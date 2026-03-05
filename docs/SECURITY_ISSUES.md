@@ -1,6 +1,6 @@
 # Security Issues Found
 
-98 issues found and fixed across 18 rounds of security review. All issues were found through automated code review and fixed with corresponding tests.
+99 issues found and fixed across 19 rounds of security review. All issues were found through automated code review and fixed with corresponding tests.
 
 ## Round 1 — 22 issues (foundational hardening)
 
@@ -156,7 +156,7 @@ Established the core security model.
 
 | Category | Count | Rounds |
 |----------|-------|--------|
-| Resource limits (CPU/memory/PIDs/swap) | 19 | 1, 4, 5, 6, 7, 8, 10, 13, 16, 17, 18 |
+| Resource limits (CPU/memory/PIDs/swap) | 20 | 1, 4, 5, 6, 7, 8, 10, 13, 16, 17, 18, 19 |
 | Namespace escape | 11 | 1, 5, 6, 8 |
 | Filesystem/bind mounts | 8 | 1, 2, 8, 10 |
 | Ownership/isolation | 12 | 1, 3, 9, 12, 13, 17 |
@@ -218,6 +218,14 @@ Established the core security model.
 | 1 | Resources | `tmpfs` mount type allowed in `Mounts` — same cgroups v1 memory bypass as stripped `Tmpfs` HostConfig and `ShmSize` | CRITICAL |
 
 **Totals: 28 CRITICAL, 61 IMPORTANT, 9 LOW.**
+
+## Round 19 — 1 issue
+
+| # | Category | Issue | Severity |
+|---|----------|-------|----------|
+| 1 | Resources | `VolumeOptions.DriverConfig` in Mounts passes through — tmpfs-via-driver memory limit bypass on cgroups v1 | IMPORTANT |
+
+**Totals: 28 CRITICAL, 62 IMPORTANT, 9 LOW.**
 
 ## Recurring patterns
 

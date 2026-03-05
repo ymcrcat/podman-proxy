@@ -3672,6 +3672,27 @@ func TestStripRestartPolicy(t *testing.T) {
 	}
 }
 
+func TestMountsVolumeOptionsStripped(t *testing.T) {
+	p := defaultPolicy()
+	body := `{"Image":"alpine","HostConfig":{"Mounts":[{"Type":"volume","Source":"mydata","Target":"/data","VolumeOptions":{"DriverConfig":{"Name":"local","Options":{"type":"tmpfs","o":"size=100g"}}}}]}}`
+	sanitized, err := p.ValidateAndSanitize([]byte(body))
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	var raw map[string]json.RawMessage
+	json.Unmarshal(sanitized, &raw)
+	var hc map[string]json.RawMessage
+	json.Unmarshal(raw["HostConfig"], &hc)
+	var mounts []map[string]json.RawMessage
+	json.Unmarshal(hc["Mounts"], &mounts)
+	if len(mounts) != 1 {
+		t.Fatalf("expected 1 mount, got %d", len(mounts))
+	}
+	if _, ok := mounts[0]["VolumeOptions"]; ok {
+		t.Error("VolumeOptions should have been stripped from mount entry")
+	}
+}
+
 func init() {
 	_ = os.Stderr
 }

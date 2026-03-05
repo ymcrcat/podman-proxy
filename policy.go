@@ -351,9 +351,9 @@ func (p *Policy) validateBinds(binds []string) error {
 	return nil
 }
 
-// validateMounts checks Mounts using an allowlist of safe types.
-// Only bind (with workspace path validation), tmpfs, and volume are permitted.
-// Other types (e.g. "image") are rejected to prevent image allowlist bypass.
+// validateMounts checks Mounts using an allowlist of safe types and sanitizes
+// mount options. Only bind (with workspace path validation) and volume are
+// permitted. Tmpfs and other types are rejected.
 func (p *Policy) validateMounts(rawHC map[string]json.RawMessage) error {
 	mountsRaw, ok := rawHC["Mounts"]
 	if !ok || len(mountsRaw) == 0 || string(mountsRaw) == "null" {
@@ -375,6 +375,7 @@ func (p *Policy) validateMounts(rawHC map[string]json.RawMessage) error {
 		case "volume":
 			// Named volumes — no host path to validate. Volume management
 			// endpoints are blocked so agents can't create arbitrary volumes.
+			// VolumeOptions/DriverConfig stripped below.
 		case "tmpfs":
 			// Rejected — on cgroups v1, tmpfs memory is not counted against
 			// the cgroup Memory limit. Same rationale as stripping the Tmpfs
@@ -384,6 +385,22 @@ func (p *Policy) validateMounts(rawHC map[string]json.RawMessage) error {
 			return fmt.Errorf("mount type %q is not allowed", m.Type)
 		}
 	}
+
+	// Sanitize mount options: strip VolumeOptions (DriverConfig can create
+	// tmpfs-backed volumes bypassing memory limits), BindOptions (propagation
+	// control), and TmpfsOptions from all entries.
+	var rawMounts []map[string]json.RawMessage
+	if err := json.Unmarshal(mountsRaw, &rawMounts); err != nil {
+		return fmt.Errorf("invalid Mounts field: %w", err)
+	}
+	for _, entry := range rawMounts {
+		delete(entry, "VolumeOptions")
+		delete(entry, "BindOptions")
+		delete(entry, "TmpfsOptions")
+	}
+	sanitized, _ := json.Marshal(rawMounts)
+	rawHC["Mounts"] = sanitized
+
 	return nil
 }
 
