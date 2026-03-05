@@ -195,6 +195,14 @@ func (p *Policy) ValidateAndSanitize(body []byte) ([]byte, error) {
 	// its memory limit.
 	delete(rawHC, "OomKillDisable")
 
+	// Strip PortBindings — prevents agents from binding to host ports,
+	// which could expose services on external interfaces or steal ports
+	// from other host services.
+	delete(rawHC, "PortBindings")
+
+	// Strip PublishAllPorts — same rationale as PortBindings.
+	delete(rawHC, "PublishAllPorts")
+
 	// Cap memory. Always enforce when MaxMemory is configured (Memory=0 means
 	// unlimited in Podman, which would bypass the limit).
 	effectiveMemory := hc.Memory

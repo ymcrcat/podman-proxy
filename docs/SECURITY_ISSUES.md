@@ -1,6 +1,6 @@
 # Security Issues Found
 
-72 issues found and fixed across 11 rounds of security review. All issues were found through automated code review and fixed with corresponding tests.
+76 issues found and fixed across 12 rounds of security review. All issues were found through automated code review and fixed with corresponding tests.
 
 ## Round 1 — 22 issues (foundational hardening)
 
@@ -131,6 +131,15 @@ Established the core security model.
 | 2 | Policy bypass | `OomKillDisable` passed through unsanitized — on cgroups v1, disables OOM killer causing host-wide kills | IMPORTANT |
 | 3 | Input validation | Query parameters forwarded unsanitized for container operations — `stop?t=-1`, `kill?signal=SIGSEGV`, `delete?depend=true`, `top?ps_args=` | IMPORTANT |
 
+## Round 12 — 4 issues
+
+| # | Category | Issue | Severity |
+|---|----------|-------|----------|
+| 1 | Isolation | `name` query param forwarded to Podman before validation on create — proxy/Podman name desync | IMPORTANT |
+| 2 | Networking | `PortBindings` and `PublishAllPorts` passed through unrestricted — host port squatting and external interface exposure | IMPORTANT |
+| 3 | Input validation | `resize?h`/`w` not validated as bounded integers (0–65535) before forwarding to kernel ioctl | LOW |
+| 4 | Input validation | `wait?condition` not validated against documented allowlist | LOW |
+
 ## Summary by category
 
 | Category | Count | Rounds |
@@ -138,15 +147,16 @@ Established the core security model.
 | Resource limits (CPU/memory/PIDs/swap) | 14 | 1, 4, 5, 6, 7, 8, 10 |
 | Namespace escape | 11 | 1, 5, 6, 8 |
 | Filesystem/bind mounts | 8 | 1, 2, 8, 10 |
-| Ownership/isolation | 8 | 1, 3, 9 |
+| Ownership/isolation | 9 | 1, 3, 9, 12 |
 | Capability/kernel | 6 | 1, 2, 11 |
 | Request smuggling/injection | 4 | 2, 4 |
 | API surface/method control | 6 | 1, 4, 5, 9 |
+| Networking | 1 | 12 |
 | Information leaks | 3 | 2, 4, 7 |
 | DoS vectors | 8 | 4, 5, 7, 9, 11 |
-| Input validation | 4 | 5, 6, 7, 11 |
+| Input validation | 6 | 5, 6, 7, 11, 12 |
 
-**Totals: 24 CRITICAL, 41 IMPORTANT, 7 LOW.**
+**Totals: 24 CRITICAL, 43 IMPORTANT, 9 LOW.**
 
 ## Recurring patterns
 

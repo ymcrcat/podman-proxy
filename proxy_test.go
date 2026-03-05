@@ -409,8 +409,8 @@ func TestAlwaysRemarshal(t *testing.T) {
 
 func TestPreservesUnknownHostConfigFields(t *testing.T) {
 	p := defaultPolicy()
-	// PortBindings is not in our hostConfig struct — it should be preserved.
-	body := `{"Image":"alpine","HostConfig":{"NetworkMode":"bridge","PortBindings":{"80/tcp":[{"HostPort":"8080"}]}}}`
+	// Unknown fields that aren't in the strip list should be preserved.
+	body := `{"Image":"alpine","HostConfig":{"NetworkMode":"bridge","Dns":["8.8.8.8"]}}`
 	result, err := p.ValidateAndSanitize([]byte(body))
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
@@ -419,8 +419,8 @@ func TestPreservesUnknownHostConfigFields(t *testing.T) {
 	json.Unmarshal(result, &raw)
 	var rawHC map[string]json.RawMessage
 	json.Unmarshal(raw["HostConfig"], &rawHC)
-	if _, ok := rawHC["PortBindings"]; !ok {
-		t.Fatal("PortBindings was lost during re-marshal")
+	if _, ok := rawHC["Dns"]; !ok {
+		t.Fatal("Dns was lost during re-marshal")
 	}
 }
 
@@ -1774,7 +1774,6 @@ func TestCpuPeriodStrippedWhenMaxCPUs(t *testing.T) {
 
 func TestContainerNameValidation(t *testing.T) {
 	containerID := "abcdef1234560000abcdef1234560000abcdef1234560000abcdef12345600ab"
-	var registeredName string
 	podman := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if strings.Contains(r.URL.Path, "/containers/create") {
 			w.WriteHeader(http.StatusCreated)
@@ -1805,34 +1804,31 @@ func TestContainerNameValidation(t *testing.T) {
 
 	client := unixClient(sockPath)
 
-	// Create with an invalid name (contains spaces).
+	// Create with an invalid name (contains spaces) — rejected before forwarding.
 	resp, _ := client.Post(
 		"http://localhost/v4.0.0/containers/create?name=invalid%20name%20with%20spaces",
 		"application/json",
 		strings.NewReader(`{"Image":"alpine"}`),
 	)
 	resp.Body.Close()
-
-	// The container should be owned by ID but not by the invalid name.
-	if proxy.Ownership.Owns(containerID) {
-		// Good — owned by ID.
-	} else {
-		t.Fatal("container should be owned by ID")
+	if resp.StatusCode != 403 {
+		t.Fatalf("expected 403 for invalid name, got %d", resp.StatusCode)
 	}
-	if proxy.Ownership.Owns("invalid name with spaces") {
-		t.Fatal("invalid name should not be registered")
+	// Container should NOT be created at all.
+	if proxy.Ownership.Owns(containerID) {
+		t.Fatal("container should not be created with invalid name")
 	}
 
 	// Valid name should work.
-	registeredName = ""
-	_ = registeredName
 	resp, _ = client.Post(
 		"http://localhost/v4.0.0/containers/create?name=valid-name.123",
 		"application/json",
 		strings.NewReader(`{"Image":"alpine"}`),
 	)
 	resp.Body.Close()
-	// Second create returns same ID from mock, but name should be registered.
+	if resp.StatusCode != 201 {
+		t.Fatalf("expected 201 for valid name, got %d", resp.StatusCode)
+	}
 	if !proxy.Ownership.Owns("valid-name.123") {
 		t.Fatal("valid name should be registered")
 	}
@@ -2866,6 +2862,208 @@ func TestTopPsArgsStripped(t *testing.T) {
 	resp.Body.Close()
 	if strings.Contains(capturedQuery, "ps_args") {
 		t.Fatalf("ps_args should have been stripped, got %q", capturedQuery)
+	}
+}
+
+// --- Round 12 tests ---
+
+func TestCreateNameValidatedBeforeForward(t *testing.T) {
+	podman := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		t.Fatal("request should not reach podman for invalid name")
+	})
+	podmanSock, cleanup := mockPodman(t, podman)
+	defer cleanup()
+	proxySock, pcleanup := startProxy(t, podmanSock, defaultPolicy())
+	defer pcleanup()
+	client := unixClient(proxySock)
+
+	// Invalid name should be rejected before reaching Podman.
+	resp, err := client.Post(
+		"http://localhost/v4.0.0/containers/create?name=../evil",
+		"application/json",
+		strings.NewReader(`{"Image":"alpine"}`),
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	resp.Body.Close()
+	if resp.StatusCode != 403 {
+		t.Fatalf("expected 403 for invalid name, got %d", resp.StatusCode)
+	}
+}
+
+func TestCreateQueryParamsSanitized(t *testing.T) {
+	const containerID = "ff66aa11bb22cc33dd44ee55ff66aa11bb22cc33dd44ee55ff66aa11bb22cc33"
+	var capturedQuery string
+	podman := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		capturedQuery = r.URL.RawQuery
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusCreated)
+		fmt.Fprintf(w, `{"Id":"%s"}`, containerID)
+	})
+	podmanSock, cleanup := mockPodman(t, podman)
+	defer cleanup()
+	proxySock, pcleanup := startProxy(t, podmanSock, defaultPolicy())
+	defer pcleanup()
+	client := unixClient(proxySock)
+
+	// Extra query params should be stripped; only name should pass through.
+	resp, err := client.Post(
+		"http://localhost/v4.0.0/containers/create?name=valid-name&extra=bad&platform=linux",
+		"application/json",
+		strings.NewReader(`{"Image":"alpine"}`),
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	resp.Body.Close()
+	if resp.StatusCode != 201 {
+		t.Fatalf("expected 201, got %d", resp.StatusCode)
+	}
+	if !strings.Contains(capturedQuery, "name=valid-name") {
+		t.Fatalf("name should pass through, got %q", capturedQuery)
+	}
+	if strings.Contains(capturedQuery, "extra") || strings.Contains(capturedQuery, "platform") {
+		t.Fatalf("extra params should be stripped, got %q", capturedQuery)
+	}
+}
+
+func TestStripPortBindings(t *testing.T) {
+	p := defaultPolicy()
+	body := `{"Image":"alpine","HostConfig":{"PortBindings":{"80/tcp":[{"HostIp":"0.0.0.0","HostPort":"80"}]}}}`
+	result, err := p.ValidateAndSanitize([]byte(body))
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	var raw map[string]json.RawMessage
+	json.Unmarshal(result, &raw)
+	var rawHC map[string]json.RawMessage
+	json.Unmarshal(raw["HostConfig"], &rawHC)
+	if _, ok := rawHC["PortBindings"]; ok {
+		t.Fatal("PortBindings should have been stripped")
+	}
+}
+
+func TestStripPublishAllPorts(t *testing.T) {
+	p := defaultPolicy()
+	body := `{"Image":"alpine","HostConfig":{"PublishAllPorts":true}}`
+	result, err := p.ValidateAndSanitize([]byte(body))
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	var raw map[string]json.RawMessage
+	json.Unmarshal(result, &raw)
+	var rawHC map[string]json.RawMessage
+	json.Unmarshal(raw["HostConfig"], &rawHC)
+	if _, ok := rawHC["PublishAllPorts"]; ok {
+		t.Fatal("PublishAllPorts should have been stripped")
+	}
+}
+
+func TestResizeDimensionValidation(t *testing.T) {
+	cid := "1122334455667788990011223344556677889900112233445566778899001122"
+	var capturedQuery string
+	podmanSock, cleanup := mockPodman(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		capturedQuery = r.URL.RawQuery
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer cleanup()
+
+	sockPath := testSockPath(t, "x")
+	proxy := &Proxy{
+		PodmanSocket: podmanSock,
+		Policy:       defaultPolicy(),
+		Ownership:    NewOwnership(),
+		AgentID:      "test",
+	}
+	listener, err := net.Listen("unix", sockPath)
+	if err != nil {
+		t.Fatalf("listen: %v", err)
+	}
+	server := &http.Server{Handler: proxy}
+	go server.Serve(listener)
+	defer func() { server.Close(); listener.Close() }()
+	proxy.Ownership.Add(cid, "")
+	client := unixClient(sockPath)
+
+	// Valid dimensions should pass
+	resp, err := client.Post(
+		"http://localhost/v4.0.0/containers/"+cid+"/resize?h=24&w=80",
+		"", nil,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	resp.Body.Close()
+	if !strings.Contains(capturedQuery, "h=24") || !strings.Contains(capturedQuery, "w=80") {
+		t.Fatalf("valid dimensions should pass, got %q", capturedQuery)
+	}
+
+	// Overflow dimension should be stripped
+	resp, err = client.Post(
+		"http://localhost/v4.0.0/containers/"+cid+"/resize?h=99999999&w=80",
+		"", nil,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	resp.Body.Close()
+	if strings.Contains(capturedQuery, "h=") {
+		t.Fatalf("oversize h should be stripped, got %q", capturedQuery)
+	}
+}
+
+func TestWaitConditionValidation(t *testing.T) {
+	cid := "2233445566778899001122334455667788990011223344556677889900112233"
+	var capturedQuery string
+	podmanSock, cleanup := mockPodman(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		capturedQuery = r.URL.RawQuery
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer cleanup()
+
+	sockPath := testSockPath(t, "x")
+	proxy := &Proxy{
+		PodmanSocket: podmanSock,
+		Policy:       defaultPolicy(),
+		Ownership:    NewOwnership(),
+		AgentID:      "test",
+		streamSem:    make(chan struct{}, maxConcurrentStream),
+	}
+	listener, err := net.Listen("unix", sockPath)
+	if err != nil {
+		t.Fatalf("listen: %v", err)
+	}
+	server := &http.Server{Handler: proxy}
+	go server.Serve(listener)
+	defer func() { server.Close(); listener.Close() }()
+	proxy.Ownership.Add(cid, "")
+	client := unixClient(sockPath)
+
+	// Valid condition should pass through
+	resp, err := client.Post(
+		"http://localhost/v4.0.0/containers/"+cid+"/wait?condition=stopped",
+		"", nil,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	resp.Body.Close()
+	if !strings.Contains(capturedQuery, "condition=stopped") {
+		t.Fatalf("valid condition should pass, got %q", capturedQuery)
+	}
+
+	// Invalid condition should be stripped
+	resp, err = client.Post(
+		"http://localhost/v4.0.0/containers/"+cid+"/wait?condition=running",
+		"", nil,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	resp.Body.Close()
+	if strings.Contains(capturedQuery, "condition") {
+		t.Fatalf("invalid condition should be stripped, got %q", capturedQuery)
 	}
 }
 

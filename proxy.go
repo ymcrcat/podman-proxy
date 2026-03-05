@@ -202,14 +202,31 @@ func (p *Proxy) handleCreate(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Forward with sanitized body.
-	resp, respBody, err := p.doForward(r, sanitized)
+	// Validate and sanitize query parameters before forwarding.
+	// Only the "name" parameter is meaningful for create; strip everything else.
+	name := r.URL.Query().Get("name")
+	if name != "" && !containerNameRe.MatchString(name) {
+		http.Error(w, "forbidden: invalid container name", http.StatusForbidden)
+		return
+	}
+	createReq := *r
+	createURL := *r.URL
+	q := url.Values{}
+	if name != "" {
+		q.Set("name", name)
+	}
+	createURL.RawQuery = q.Encode()
+	createReq.URL = &createURL
+
+	// Forward with sanitized body and sanitized query params.
+	resp, respBody, err := p.doForward(&createReq, sanitized)
 	if err != nil {
 		http.Error(w, fmt.Sprintf("upstream error: %v", err), http.StatusBadGateway)
 		return
 	}
 
 	// Track the container on any 2xx response.
+	// Name was already validated above before forwarding.
 	if resp.StatusCode >= 200 && resp.StatusCode < 300 {
 		var createResp struct {
 			Id string `json:"Id"`
@@ -218,11 +235,6 @@ func (p *Proxy) handleCreate(w http.ResponseWriter, r *http.Request) {
 			if !containerIDRe.MatchString(createResp.Id) {
 				log.Printf("[%s] WARNING: ignoring invalid container ID format from podman: %.24s...", p.AgentID, createResp.Id)
 			} else {
-				name := r.URL.Query().Get("name")
-				if name != "" && !containerNameRe.MatchString(name) {
-					log.Printf("[%s] WARNING: ignoring invalid container name %q", p.AgentID, name)
-					name = ""
-				}
 				p.Ownership.Add(createResp.Id, name)
 				short := createResp.Id[:12]
 				log.Printf("[%s] CREATED container %s", p.AgentID, short)
@@ -358,6 +370,26 @@ func (p *Proxy) handleContainerOp(w http.ResponseWriter, r *http.Request, versio
 		sig := strings.ToUpper(sanitizedQuery.Get("signal"))
 		if sig != "" && !allowedKillSignals[sig] {
 			sanitizedQuery.Del("signal")
+		}
+	}
+	if action == "resize" {
+		for _, dim := range []string{"h", "w"} {
+			if v := sanitizedQuery.Get(dim); v != "" {
+				n, err := strconv.ParseInt(v, 10, 64)
+				if err != nil || n < 1 || n > 65535 {
+					sanitizedQuery.Del(dim)
+				}
+			}
+		}
+	}
+	if action == "wait" {
+		if cond := sanitizedQuery.Get("condition"); cond != "" {
+			validConditions := map[string]bool{
+				"next-exit": true, "not-running": true, "removed": true, "stopped": true,
+			}
+			if !validConditions[cond] {
+				sanitizedQuery.Del("condition")
+			}
 		}
 	}
 
