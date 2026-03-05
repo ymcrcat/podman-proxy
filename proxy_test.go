@@ -1832,6 +1832,197 @@ func TestContainerNameValidation(t *testing.T) {
 	}
 }
 
+func TestBlockUsernsContainerMode(t *testing.T) {
+	podmanSock, cleanup := mockPodman(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		t.Fatal("request should not reach podman")
+	}))
+	defer cleanup()
+
+	proxySock, pcleanup := startProxy(t, podmanSock, defaultPolicy())
+	defer pcleanup()
+
+	client := unixClient(proxySock)
+
+	// container:<id> mode should be blocked.
+	resp, _ := client.Post(
+		"http://localhost/v4.0.0/containers/create",
+		"application/json",
+		strings.NewReader(`{"Image":"alpine","HostConfig":{"UsernsMode":"container:abc123"}}`),
+	)
+	resp.Body.Close()
+	if resp.StatusCode != 403 {
+		t.Fatalf("expected 403, got %d", resp.StatusCode)
+	}
+
+	// host mode should also be blocked.
+	resp, _ = client.Post(
+		"http://localhost/v4.0.0/containers/create",
+		"application/json",
+		strings.NewReader(`{"Image":"alpine","HostConfig":{"UsernsMode":"host"}}`),
+	)
+	resp.Body.Close()
+	if resp.StatusCode != 403 {
+		t.Fatalf("expected 403 for host userns, got %d", resp.StatusCode)
+	}
+}
+
+func TestBlockCgroupnsContainerMode(t *testing.T) {
+	podmanSock, cleanup := mockPodman(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		t.Fatal("request should not reach podman")
+	}))
+	defer cleanup()
+
+	proxySock, pcleanup := startProxy(t, podmanSock, defaultPolicy())
+	defer pcleanup()
+
+	client := unixClient(proxySock)
+
+	// container:<id> mode should be blocked.
+	resp, _ := client.Post(
+		"http://localhost/v4.0.0/containers/create",
+		"application/json",
+		strings.NewReader(`{"Image":"alpine","HostConfig":{"CgroupnsMode":"container:abc123"}}`),
+	)
+	resp.Body.Close()
+	if resp.StatusCode != 403 {
+		t.Fatalf("expected 403, got %d", resp.StatusCode)
+	}
+
+	// host mode should also be blocked.
+	resp, _ = client.Post(
+		"http://localhost/v4.0.0/containers/create",
+		"application/json",
+		strings.NewReader(`{"Image":"alpine","HostConfig":{"CgroupnsMode":"host"}}`),
+	)
+	resp.Body.Close()
+	if resp.StatusCode != 403 {
+		t.Fatalf("expected 403 for host cgroupns, got %d", resp.StatusCode)
+	}
+}
+
+func TestRenameNameValidation(t *testing.T) {
+	const containerID = "abc123def456789012345678abc123def456789012345678abc123def4567890"
+	podmanSock, cleanup := mockPodman(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(200)
+	}))
+	defer cleanup()
+
+	sockPath := testSockPath(t, "x")
+	proxy := &Proxy{
+		PodmanSocket: podmanSock,
+		Policy:       defaultPolicy(),
+		Ownership:    NewOwnership(),
+		AgentID:      "test",
+	}
+	listener, err := net.Listen("unix", sockPath)
+	if err != nil {
+		t.Fatalf("listen: %v", err)
+	}
+	server := &http.Server{Handler: proxy}
+	go server.Serve(listener)
+	defer func() { server.Close(); listener.Close() }()
+
+	proxy.Ownership.Add(containerID, "original-name")
+
+	client := unixClient(sockPath)
+
+	// Rename to valid name should update ownership.
+	resp, _ := client.Post(
+		"http://localhost/v4.0.0/containers/"+containerID+"/rename?name=new-valid-name",
+		"application/json",
+		nil,
+	)
+	resp.Body.Close()
+	if resp.StatusCode != 200 {
+		t.Fatalf("expected 200, got %d", resp.StatusCode)
+	}
+	if !proxy.Ownership.Owns("new-valid-name") {
+		t.Fatal("valid rename name should be tracked")
+	}
+
+	// Rename to invalid name (contains special chars) — podman returns 200 but proxy should not track.
+	resp, _ = client.Post(
+		"http://localhost/v4.0.0/containers/"+containerID+"/rename?name=../evil",
+		"application/json",
+		nil,
+	)
+	resp.Body.Close()
+	if proxy.Ownership.Owns("../evil") {
+		t.Fatal("invalid rename name should NOT be tracked")
+	}
+}
+
+func TestMemoryZeroEnforced(t *testing.T) {
+	var capturedBody []byte
+	const containerID = "abc123def456789012345678abc123def456789012345678abc123def4567890"
+
+	podmanSock, cleanup := mockPodman(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		capturedBody, _ = io.ReadAll(r.Body)
+		w.Header().Set("Content-Type", "application/json")
+		fmt.Fprintf(w, `{"Id":"%s"}`, containerID)
+	}))
+	defer cleanup()
+
+	policy := defaultPolicy()
+	policy.MaxMemory = 1024 * 1024 * 1024 // 1GB
+
+	proxySock, pcleanup := startProxy(t, podmanSock, policy)
+	defer pcleanup()
+
+	client := unixClient(proxySock)
+
+	// Memory=0 should be set to MaxMemory (0 means unlimited in Podman).
+	resp, _ := client.Post(
+		"http://localhost/v4.0.0/containers/create",
+		"application/json",
+		strings.NewReader(`{"Image":"alpine","HostConfig":{"Memory":0}}`),
+	)
+	resp.Body.Close()
+	if resp.StatusCode != 200 {
+		t.Fatalf("expected 200, got %d", resp.StatusCode)
+	}
+
+	var body map[string]json.RawMessage
+	json.Unmarshal(capturedBody, &body)
+	var hc map[string]json.RawMessage
+	json.Unmarshal(body["HostConfig"], &hc)
+	var mem int64
+	json.Unmarshal(hc["Memory"], &mem)
+	if mem != policy.MaxMemory {
+		t.Fatalf("Memory=0 should be capped to %d, got %d", policy.MaxMemory, mem)
+	}
+
+	// Memory not specified (omitted) should also be set to MaxMemory.
+	resp, _ = client.Post(
+		"http://localhost/v4.0.0/containers/create",
+		"application/json",
+		strings.NewReader(`{"Image":"alpine"}`),
+	)
+	resp.Body.Close()
+
+	json.Unmarshal(capturedBody, &body)
+	json.Unmarshal(body["HostConfig"], &hc)
+	json.Unmarshal(hc["Memory"], &mem)
+	if mem != policy.MaxMemory {
+		t.Fatalf("omitted Memory should be capped to %d, got %d", policy.MaxMemory, mem)
+	}
+
+	// Memory within limit should pass through unchanged.
+	resp, _ = client.Post(
+		"http://localhost/v4.0.0/containers/create",
+		"application/json",
+		strings.NewReader(`{"Image":"alpine","HostConfig":{"Memory":536870912}}`),
+	)
+	resp.Body.Close()
+
+	json.Unmarshal(capturedBody, &body)
+	json.Unmarshal(body["HostConfig"], &hc)
+	json.Unmarshal(hc["Memory"], &mem)
+	if mem != 536870912 {
+		t.Fatalf("Memory within limit should pass through, got %d", mem)
+	}
+}
+
 func init() {
 	_ = os.Stderr
 }

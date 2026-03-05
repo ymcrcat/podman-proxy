@@ -142,11 +142,11 @@ func (p *Policy) ValidateAndSanitize(body []byte) ([]byte, error) {
 	if isUnsafeMode(hc.UTSMode) {
 		return nil, fmt.Errorf("host/container UTS mode is not allowed")
 	}
-	if strings.EqualFold(hc.UsernsMode, "host") {
-		return nil, fmt.Errorf("host user namespace mode is not allowed")
+	if isUnsafeMode(hc.UsernsMode) {
+		return nil, fmt.Errorf("host/container user namespace mode is not allowed")
 	}
-	if strings.EqualFold(hc.CgroupnsMode, "host") {
-		return nil, fmt.Errorf("host cgroup namespace mode is not allowed")
+	if isUnsafeMode(hc.CgroupnsMode) {
+		return nil, fmt.Errorf("host/container cgroup namespace mode is not allowed")
 	}
 
 	// Validate bind mounts (legacy Binds format).
@@ -186,10 +186,13 @@ func (p *Policy) ValidateAndSanitize(body []byte) ([]byte, error) {
 	// bypassing workspace bind-mount restrictions.
 	delete(rawHC, "VolumesFrom")
 
-	// Cap memory.
-	if p.MaxMemory > 0 && hc.Memory > p.MaxMemory {
-		b, _ := json.Marshal(p.MaxMemory)
-		rawHC["Memory"] = b
+	// Cap memory. Always enforce when MaxMemory is configured (Memory=0 means
+	// unlimited in Podman, which would bypass the limit).
+	if p.MaxMemory > 0 {
+		if hc.Memory <= 0 || hc.Memory > p.MaxMemory {
+			b, _ := json.Marshal(p.MaxMemory)
+			rawHC["Memory"] = b
+		}
 	}
 
 	// Cap MemorySwap. -1 means unlimited swap in Podman.

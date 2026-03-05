@@ -312,7 +312,11 @@ func (p *Proxy) handleContainerOp(w http.ResponseWriter, r *http.Request, versio
 	// Update ownership table after successful rename.
 	if action == "rename" && resp.StatusCode >= 200 && resp.StatusCode < 300 {
 		newName := r.URL.Query().Get("name")
-		p.Ownership.Rename(fullID, newName)
+		if containerNameRe.MatchString(newName) {
+			p.Ownership.Rename(fullID, newName)
+		} else {
+			log.Printf("[%s] WARNING: rename returned success but name %q fails validation, not tracking", p.AgentID, newName)
+		}
 	}
 }
 
