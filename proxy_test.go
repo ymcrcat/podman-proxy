@@ -3576,6 +3576,99 @@ func TestPingBodyDiscarded(t *testing.T) {
 	}
 }
 
+func TestStripMaskedPaths(t *testing.T) {
+	podmanSock, cleanup := mockPodman(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		body, _ := io.ReadAll(r.Body)
+		var raw map[string]json.RawMessage
+		json.Unmarshal(body, &raw)
+		var hc map[string]json.RawMessage
+		json.Unmarshal(raw["HostConfig"], &hc)
+		if _, ok := hc["MaskedPaths"]; ok {
+			t.Error("MaskedPaths should have been stripped")
+		}
+		if _, ok := hc["ReadonlyPaths"]; ok {
+			t.Error("ReadonlyPaths should have been stripped")
+		}
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(201)
+		w.Write([]byte(`{"Id":"aabb112233445566778899aabb112233445566778899aabb112233445566"}`))
+	}))
+	defer cleanup()
+	proxySock, pCleanup := startProxy(t, podmanSock, defaultPolicy())
+	defer pCleanup()
+	client := unixClient(proxySock)
+
+	resp, err := client.Post("http://localhost/v4.0.0/containers/create", "application/json",
+		strings.NewReader(`{"Image":"alpine","HostConfig":{"MaskedPaths":[],"ReadonlyPaths":[]}}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	resp.Body.Close()
+	if resp.StatusCode != 201 {
+		t.Fatalf("expected 201, got %d", resp.StatusCode)
+	}
+}
+
+func TestStripTmpfs(t *testing.T) {
+	podmanSock, cleanup := mockPodman(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		body, _ := io.ReadAll(r.Body)
+		var raw map[string]json.RawMessage
+		json.Unmarshal(body, &raw)
+		var hc map[string]json.RawMessage
+		json.Unmarshal(raw["HostConfig"], &hc)
+		if _, ok := hc["Tmpfs"]; ok {
+			t.Error("Tmpfs should have been stripped")
+		}
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(201)
+		w.Write([]byte(`{"Id":"ccdd112233445566778899ccdd112233445566778899ccdd112233445566"}`))
+	}))
+	defer cleanup()
+	proxySock, pCleanup := startProxy(t, podmanSock, defaultPolicy())
+	defer pCleanup()
+	client := unixClient(proxySock)
+
+	resp, err := client.Post("http://localhost/v4.0.0/containers/create", "application/json",
+		strings.NewReader(`{"Image":"alpine","HostConfig":{"Tmpfs":{"/exploit":"size=8g"}}}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	resp.Body.Close()
+	if resp.StatusCode != 201 {
+		t.Fatalf("expected 201, got %d", resp.StatusCode)
+	}
+}
+
+func TestStripRestartPolicy(t *testing.T) {
+	podmanSock, cleanup := mockPodman(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		body, _ := io.ReadAll(r.Body)
+		var raw map[string]json.RawMessage
+		json.Unmarshal(body, &raw)
+		var hc map[string]json.RawMessage
+		json.Unmarshal(raw["HostConfig"], &hc)
+		if _, ok := hc["RestartPolicy"]; ok {
+			t.Error("RestartPolicy should have been stripped")
+		}
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(201)
+		w.Write([]byte(`{"Id":"eeff112233445566778899eeff112233445566778899eeff112233445566"}`))
+	}))
+	defer cleanup()
+	proxySock, pCleanup := startProxy(t, podmanSock, defaultPolicy())
+	defer pCleanup()
+	client := unixClient(proxySock)
+
+	resp, err := client.Post("http://localhost/v4.0.0/containers/create", "application/json",
+		strings.NewReader(`{"Image":"alpine","HostConfig":{"RestartPolicy":{"Name":"always"}}}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	resp.Body.Close()
+	if resp.StatusCode != 201 {
+		t.Fatalf("expected 201, got %d", resp.StatusCode)
+	}
+}
+
 func init() {
 	_ = os.Stderr
 }

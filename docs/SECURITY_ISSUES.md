@@ -1,6 +1,6 @@
 # Security Issues Found
 
-94 issues found and fixed across 16 rounds of security review. All issues were found through automated code review and fixed with corresponding tests.
+97 issues found and fixed across 17 rounds of security review. All issues were found through automated code review and fixed with corresponding tests.
 
 ## Round 1 — 22 issues (foundational hardening)
 
@@ -156,11 +156,11 @@ Established the core security model.
 
 | Category | Count | Rounds |
 |----------|-------|--------|
-| Resource limits (CPU/memory/PIDs/swap) | 17 | 1, 4, 5, 6, 7, 8, 10, 13, 16 |
+| Resource limits (CPU/memory/PIDs/swap) | 18 | 1, 4, 5, 6, 7, 8, 10, 13, 16, 17 |
 | Namespace escape | 11 | 1, 5, 6, 8 |
 | Filesystem/bind mounts | 8 | 1, 2, 8, 10 |
-| Ownership/isolation | 11 | 1, 3, 9, 12, 13 |
-| Capability/kernel | 7 | 1, 2, 11, 16 |
+| Ownership/isolation | 12 | 1, 3, 9, 12, 13, 17 |
+| Capability/kernel | 8 | 1, 2, 11, 16, 17 |
 | Request smuggling/injection | 5 | 2, 4, 13 |
 | API surface/method control | 6 | 1, 4, 5, 9 |
 | Networking | 1 | 12 |
@@ -200,6 +200,16 @@ Established the core security model.
 | 5 | Resources | `StorageOpt` not stripped from HostConfig — container disk quota manipulation | IMPORTANT |
 
 **Totals: 25 CRITICAL, 60 IMPORTANT, 9 LOW.**
+
+## Round 17 — 3 issues
+
+| # | Category | Issue | Severity |
+|---|----------|-------|----------|
+| 1 | Kernel | `MaskedPaths`/`ReadonlyPaths` pass through — removes OCI default masking of `/proc/kcore`, `/proc/sched_debug`, `/sys/firmware` | CRITICAL |
+| 2 | Resources | `Tmpfs` map passes through — cgroups v1 memory exhaustion beyond MaxMemory (same bypass as ShmSize) | CRITICAL |
+| 3 | Isolation | `RestartPolicy` passes through — containers with `always` survive proxy shutdown without ownership tracking | IMPORTANT |
+
+**Totals: 27 CRITICAL, 61 IMPORTANT, 9 LOW.**
 
 ## Recurring patterns
 

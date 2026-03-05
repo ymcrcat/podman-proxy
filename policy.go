@@ -232,6 +232,21 @@ func (p *Policy) ValidateAndSanitize(body []byte) ([]byte, error) {
 	// storage quotas (e.g. size=1000G) that could exhaust host disk space.
 	delete(rawHC, "StorageOpt")
 
+	// Strip MaskedPaths and ReadonlyPaths — setting these to empty arrays
+	// removes the OCI default masking of /proc/kcore, /proc/sched_debug,
+	// /sys/firmware, etc. Tenants must not expose sensitive kernel interfaces.
+	delete(rawHC, "MaskedPaths")
+	delete(rawHC, "ReadonlyPaths")
+
+	// Strip Tmpfs — on cgroups v1, tmpfs memory is not counted against the
+	// cgroup Memory limit, allowing memory exhaustion beyond MaxMemory.
+	// Same rationale as ShmSize.
+	delete(rawHC, "Tmpfs")
+
+	// Strip RestartPolicy — containers with "always" restart policy survive
+	// proxy shutdown, evading cleanup and running without ownership tracking.
+	delete(rawHC, "RestartPolicy")
+
 	// Cap memory. Always enforce when MaxMemory is configured (Memory=0 means
 	// unlimited in Podman, which would bypass the limit).
 	effectiveMemory := hc.Memory
