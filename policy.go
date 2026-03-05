@@ -62,12 +62,16 @@ type mountEntry struct {
 	Source string `json:"Source"`
 }
 
-// isUnsafeMode returns true if the namespace mode is "host" or "container:<id>".
-// The "container:" form shares namespaces with another container, enabling
-// cross-tenant access to network, PID, IPC, or UTS namespaces.
+// isUnsafeMode returns true if the namespace mode would share namespaces with
+// the host or another entity. Blocks three forms:
+//   - "host" — shares the host's namespace directly
+//   - "container:<id>" — shares another container's namespace
+//   - "ns:<path>" — joins a namespace by filesystem path (e.g. /proc/1/ns/net)
 func isUnsafeMode(mode string) bool {
 	lower := strings.ToLower(mode)
-	return lower == "host" || strings.HasPrefix(lower, "container:")
+	return lower == "host" ||
+		strings.HasPrefix(lower, "container:") ||
+		strings.HasPrefix(lower, "ns:")
 }
 
 // ValidateAndSanitize checks the container create body against the policy.
@@ -105,11 +109,11 @@ func (p *Policy) ValidateAndSanitize(body []byte) ([]byte, error) {
 		}
 	}
 
-	// Parse HostConfig if present.
+	// Parse HostConfig if present. When absent or null, create an empty one
+	// so that resource limits (Memory, CPU, PIDs) are still enforced below.
 	hcRaw, hcPresent := raw["HostConfig"]
 	if !hcPresent || string(hcRaw) == "null" {
-		// No HostConfig — still re-marshal to collapse duplicate top-level keys.
-		return json.Marshal(raw)
+		hcRaw = json.RawMessage(`{}`)
 	}
 
 	// Parse HostConfig into its own raw map to preserve unknown fields.
@@ -250,13 +254,20 @@ func (p *Policy) ValidateAndSanitize(body []byte) ([]byte, error) {
 func (p *Policy) validateBinds(binds []string) error {
 	for _, bind := range binds {
 		// Bind format: "host_path:container_path[:options]"
+		// Named volume format: "volume_name:container_path[:options]"
+		// Anonymous volume format: "container_path" (no colon)
 		parts := strings.SplitN(bind, ":", 2)
 		if len(parts) < 2 {
-			continue // named volume, not a host path bind
+			continue // anonymous volume — no host path
 		}
 		hostPath := parts[0]
 		if hostPath == "" {
 			return fmt.Errorf("empty host path in bind mount")
+		}
+		// Named volumes have no leading slash — they are managed by the
+		// container runtime, not host filesystem paths.
+		if !filepath.IsAbs(hostPath) {
+			continue
 		}
 		if err := p.validateHostPath(hostPath); err != nil {
 			return err

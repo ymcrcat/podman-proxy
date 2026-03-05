@@ -2251,6 +2251,133 @@ func TestStreamByteLimit(t *testing.T) {
 	}
 }
 
+func TestBlockNsNamespaceMode(t *testing.T) {
+	podmanSock, cleanup := mockPodman(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		t.Fatal("request should not reach podman")
+	}))
+	defer cleanup()
+
+	proxySock, pcleanup := startProxy(t, podmanSock, defaultPolicy())
+	defer pcleanup()
+
+	client := unixClient(proxySock)
+
+	modes := []struct {
+		field string
+		value string
+	}{
+		{"NetworkMode", "ns:/proc/1/ns/net"},
+		{"PidMode", "ns:/proc/1/ns/pid"},
+		{"IpcMode", "ns:/proc/1/ns/ipc"},
+		{"UTSMode", "ns:/proc/1/ns/uts"},
+		{"UsernsMode", "ns:/proc/1/ns/user"},
+		{"CgroupnsMode", "ns:/proc/1/ns/cgroup"},
+	}
+
+	for _, m := range modes {
+		body := fmt.Sprintf(`{"Image":"alpine","HostConfig":{"%s":"%s"}}`, m.field, m.value)
+		resp, _ := client.Post(
+			"http://localhost/v4.0.0/containers/create",
+			"application/json",
+			strings.NewReader(body),
+		)
+		resp.Body.Close()
+		if resp.StatusCode != 403 {
+			t.Fatalf("%s=%s: expected 403, got %d", m.field, m.value, resp.StatusCode)
+		}
+	}
+}
+
+func TestResourceLimitsWithoutHostConfig(t *testing.T) {
+	var capturedBody []byte
+	const containerID = "abc123def456789012345678abc123def456789012345678abc123def4567890"
+
+	podmanSock, cleanup := mockPodman(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		capturedBody, _ = io.ReadAll(r.Body)
+		w.Header().Set("Content-Type", "application/json")
+		fmt.Fprintf(w, `{"Id":"%s"}`, containerID)
+	}))
+	defer cleanup()
+
+	policy := defaultPolicy()
+	policy.MaxMemory = 1024 * 1024 * 1024 // 1GB
+	policy.MaxCPUs = 2.0
+	policy.MaxPids = 512
+
+	proxySock, pcleanup := startProxy(t, podmanSock, policy)
+	defer pcleanup()
+
+	client := unixClient(proxySock)
+
+	// No HostConfig at all — resource limits should still be enforced.
+	resp, _ := client.Post(
+		"http://localhost/v4.0.0/containers/create",
+		"application/json",
+		strings.NewReader(`{"Image":"alpine"}`),
+	)
+	resp.Body.Close()
+	if resp.StatusCode != 200 {
+		t.Fatalf("expected 200, got %d", resp.StatusCode)
+	}
+
+	var body map[string]json.RawMessage
+	json.Unmarshal(capturedBody, &body)
+	var hc map[string]json.RawMessage
+	json.Unmarshal(body["HostConfig"], &hc)
+
+	var mem int64
+	json.Unmarshal(hc["Memory"], &mem)
+	if mem != policy.MaxMemory {
+		t.Fatalf("Memory should be %d, got %d", policy.MaxMemory, mem)
+	}
+
+	var nano int64
+	json.Unmarshal(hc["NanoCpus"], &nano)
+	expectedNano := int64(2.0 * 1e9)
+	if nano != expectedNano {
+		t.Fatalf("NanoCpus should be %d, got %d", expectedNano, nano)
+	}
+
+	var pids int64
+	json.Unmarshal(hc["PidsLimit"], &pids)
+	if pids != policy.MaxPids {
+		t.Fatalf("PidsLimit should be %d, got %d", policy.MaxPids, pids)
+	}
+
+	// Explicit null HostConfig should also get limits.
+	resp, _ = client.Post(
+		"http://localhost/v4.0.0/containers/create",
+		"application/json",
+		strings.NewReader(`{"Image":"alpine","HostConfig":null}`),
+	)
+	resp.Body.Close()
+
+	json.Unmarshal(capturedBody, &body)
+	json.Unmarshal(body["HostConfig"], &hc)
+	json.Unmarshal(hc["Memory"], &mem)
+	if mem != policy.MaxMemory {
+		t.Fatalf("null HostConfig: Memory should be %d, got %d", policy.MaxMemory, mem)
+	}
+}
+
+func TestNamedVolumesAllowed(t *testing.T) {
+	p := defaultPolicy()
+
+	// Named volume in Binds format should be allowed (not treated as bind mount).
+	body := `{"Image":"alpine","HostConfig":{"Binds":["mydata:/data","cache_vol:/cache:ro"]}}`
+	_, err := p.ValidateAndSanitize([]byte(body))
+	if err != nil {
+		t.Fatalf("named volumes should be allowed, got error: %v", err)
+	}
+
+	// Absolute path outside workspace should still be blocked.
+	body = `{"Image":"alpine","HostConfig":{"Binds":["/etc:/mnt/etc"]}}`
+	_, err = p.ValidateAndSanitize([]byte(body))
+	if err == nil {
+		t.Fatal("absolute bind mount outside workspace should be blocked")
+	}
+}
+
 func init() {
 	_ = os.Stderr
 }
