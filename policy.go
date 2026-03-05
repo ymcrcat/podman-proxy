@@ -372,8 +372,14 @@ func (p *Policy) validateMounts(rawHC map[string]json.RawMessage) error {
 			if err := p.validateHostPath(m.Source); err != nil {
 				return err
 			}
-		case "tmpfs", "volume":
-			// Safe — no host path to validate.
+		case "volume":
+			// Named volumes — no host path to validate. Volume management
+			// endpoints are blocked so agents can't create arbitrary volumes.
+		case "tmpfs":
+			// Rejected — on cgroups v1, tmpfs memory is not counted against
+			// the cgroup Memory limit. Same rationale as stripping the Tmpfs
+			// HostConfig field and ShmSize.
+			return fmt.Errorf("mount type %q is not allowed (use container defaults)", m.Type)
 		default:
 			return fmt.Errorf("mount type %q is not allowed", m.Type)
 		}

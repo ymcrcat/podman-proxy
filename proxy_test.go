@@ -2541,11 +2541,14 @@ func TestBlockImageMountType(t *testing.T) {
 		t.Fatalf("expected 'not allowed' error, got: %v", err)
 	}
 
-	// type=tmpfs should be allowed.
+	// type=tmpfs should be blocked (cgroups v1 memory exhaustion, same as Tmpfs/ShmSize).
 	body = `{"Image":"alpine","HostConfig":{"Mounts":[{"Type":"tmpfs","Target":"/tmp"}]}}`
 	_, err = p.ValidateAndSanitize([]byte(body))
-	if err != nil {
-		t.Fatalf("tmpfs mount should be allowed, got error: %v", err)
+	if err == nil {
+		t.Fatal("tmpfs mount type should be blocked")
+	}
+	if !strings.Contains(err.Error(), "not allowed") {
+		t.Fatalf("expected 'not allowed' error, got: %v", err)
 	}
 
 	// type=volume should be allowed.
