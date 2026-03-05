@@ -31,25 +31,26 @@ var (
 	pingRe            = regexp.MustCompile(`^(/v[\d.]+)?/_ping$`)
 	versionRe         = regexp.MustCompile(`^(/v[\d.]+)?/version$`)
 	containerIDRe     = regexp.MustCompile(`^[0-9a-f]{64}$`)
+	containerNameRe   = regexp.MustCompile(`^[a-zA-Z0-9][a-zA-Z0-9_.-]{0,253}$`)
 )
 
-// allowedContainerActions is the whitelist of per-container sub-operations.
-// Everything not in this set is blocked (exec, update, archive, copy, export, etc.).
-var allowedContainerActions = map[string]bool{
-	"":        true, // inspect (GET) or delete (DELETE) with no action
-	"start":   true,
-	"stop":    true,
-	"kill":    true,
-	"wait":    true,
-	"logs":    true,
-	"json":    true, // inspect
-	"top":     true,
-	"stats":   true,
-	"rename":  true,
-	"resize":  true,
-	"pause":   true,
-	"unpause": true,
-	"remove":  true,
+// allowedActionMethods maps each allowed container action to its permitted HTTP methods.
+// Everything not in this map is blocked (exec, update, archive, copy, export, etc.).
+var allowedActionMethods = map[string][]string{
+	"":        {http.MethodGet, http.MethodDelete}, // inspect (GET) or delete (DELETE)
+	"start":   {http.MethodPost},
+	"stop":    {http.MethodPost},
+	"kill":    {http.MethodPost},
+	"wait":    {http.MethodPost},
+	"logs":    {http.MethodGet},
+	"json":    {http.MethodGet}, // inspect
+	"top":     {http.MethodGet},
+	"stats":   {http.MethodGet},
+	"rename":  {http.MethodPost},
+	"resize":  {http.MethodPost},
+	"pause":   {http.MethodPost},
+	"unpause": {http.MethodPost},
+	"remove":  {http.MethodDelete, http.MethodPost},
 }
 
 // allowedResponseHeaders is the set of upstream headers forwarded to clients.
@@ -172,6 +173,10 @@ func (p *Proxy) handleCreate(w http.ResponseWriter, r *http.Request) {
 				log.Printf("[%s] WARNING: ignoring invalid container ID format from podman: %.24s...", p.AgentID, createResp.Id)
 			} else {
 				name := r.URL.Query().Get("name")
+				if name != "" && !containerNameRe.MatchString(name) {
+					log.Printf("[%s] WARNING: ignoring invalid container name %q", p.AgentID, name)
+					name = ""
+				}
 				p.Ownership.Add(createResp.Id, name)
 				short := createResp.Id[:12]
 				log.Printf("[%s] CREATED container %s", p.AgentID, short)
@@ -231,18 +236,22 @@ func (p *Proxy) handleList(w http.ResponseWriter, r *http.Request) {
 }
 
 func (p *Proxy) handleContainerOp(w http.ResponseWriter, r *http.Request, versionPrefix, containerRef, action string) {
-	// Check action is in the whitelist.
-	if !allowedContainerActions[action] {
+	// Check action and HTTP method against the allowlist.
+	allowedMethods, actionAllowed := allowedActionMethods[action]
+	if !actionAllowed {
 		log.Printf("[%s] BLOCKED action %q on container %s", p.AgentID, action, containerRef)
 		http.Error(w, fmt.Sprintf("forbidden: action %q not allowed", action), http.StatusForbidden)
 		return
 	}
-
-	// For no-action paths, only allow GET (inspect) and DELETE (remove).
-	// Blocks PUT/POST/PATCH to bare /containers/<id> which could hit
-	// undocumented Podman endpoints.
-	if action == "" && r.Method != http.MethodGet && r.Method != http.MethodDelete {
-		log.Printf("[%s] BLOCKED %s on container %s (method not allowed)", p.AgentID, r.Method, containerRef)
+	methodOK := false
+	for _, m := range allowedMethods {
+		if r.Method == m {
+			methodOK = true
+			break
+		}
+	}
+	if !methodOK {
+		log.Printf("[%s] BLOCKED %s %s on container %s (method not allowed)", p.AgentID, r.Method, action, containerRef)
 		http.Error(w, "forbidden: method not allowed", http.StatusMethodNotAllowed)
 		return
 	}

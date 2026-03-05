@@ -1586,6 +1586,252 @@ func TestInvalidContainerIDNotRegistered(t *testing.T) {
 	// No containers should be listed since the ID was rejected.
 }
 
+// --- Round 5 security fix tests ---
+
+func TestBlockContainerNamespaceSharing(t *testing.T) {
+	p := defaultPolicy()
+	modes := []struct {
+		field string
+		body  string
+	}{
+		{"NetworkMode", `{"Image":"alpine","HostConfig":{"NetworkMode":"container:victim"}}`},
+		{"PidMode", `{"Image":"alpine","HostConfig":{"PidMode":"container:victim"}}`},
+		{"IpcMode", `{"Image":"alpine","HostConfig":{"IpcMode":"container:victim"}}`},
+		{"UTSMode", `{"Image":"alpine","HostConfig":{"UTSMode":"container:victim"}}`},
+		// Case-insensitive
+		{"NetworkMode-ci", `{"Image":"alpine","HostConfig":{"NetworkMode":"Container:victim"}}`},
+	}
+	for _, tc := range modes {
+		_, err := p.ValidateAndSanitize([]byte(tc.body))
+		if err == nil {
+			t.Fatalf("%s: expected error for container: mode", tc.field)
+		}
+		if !strings.Contains(err.Error(), "container") {
+			t.Fatalf("%s: expected 'container' in error, got: %v", tc.field, err)
+		}
+	}
+}
+
+func TestStripVolumesFrom(t *testing.T) {
+	p := defaultPolicy()
+	body := `{"Image":"alpine","HostConfig":{"VolumesFrom":["other-container:rw"]}}`
+	result, err := p.ValidateAndSanitize([]byte(body))
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	var raw map[string]json.RawMessage
+	json.Unmarshal(result, &raw)
+	var rawHC map[string]json.RawMessage
+	json.Unmarshal(raw["HostConfig"], &rawHC)
+	if _, ok := rawHC["VolumesFrom"]; ok {
+		t.Fatal("expected VolumesFrom to be stripped")
+	}
+}
+
+func TestPerActionMethodEnforcement(t *testing.T) {
+	containerID := "abc123def456789012345678abc123def456789012345678abc123def4567890"
+	podman := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if strings.Contains(r.URL.Path, "/containers/create") {
+			w.WriteHeader(http.StatusCreated)
+			json.NewEncoder(w).Encode(map[string]string{"Id": containerID})
+			return
+		}
+		w.WriteHeader(http.StatusOK)
+		w.Write([]byte("{}"))
+	})
+
+	podmanSock, cleanup1 := mockPodman(t, podman)
+	defer cleanup1()
+
+	proxySock, cleanup2 := startProxy(t, podmanSock, defaultPolicy())
+	defer cleanup2()
+
+	client := unixClient(proxySock)
+
+	// Create container.
+	resp, _ := client.Post(
+		"http://localhost/v4.0.0/containers/create",
+		"application/json",
+		strings.NewReader(`{"Image":"alpine"}`),
+	)
+	resp.Body.Close()
+
+	// GET /containers/<id>/start should be blocked (start requires POST).
+	resp, err := client.Get("http://localhost/v4.0.0/containers/" + containerID + "/start")
+	if err != nil {
+		t.Fatalf("get start: %v", err)
+	}
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusMethodNotAllowed {
+		t.Fatalf("expected 405 for GET start, got %d", resp.StatusCode)
+	}
+
+	// POST /containers/<id>/top should be blocked (top requires GET).
+	resp, err = client.Post("http://localhost/v4.0.0/containers/"+containerID+"/top", "", nil)
+	if err != nil {
+		t.Fatalf("post top: %v", err)
+	}
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusMethodNotAllowed {
+		t.Fatalf("expected 405 for POST top, got %d", resp.StatusCode)
+	}
+
+	// POST /containers/<id>/start should work.
+	resp, err = client.Post("http://localhost/v4.0.0/containers/"+containerID+"/start", "", nil)
+	if err != nil {
+		t.Fatalf("post start: %v", err)
+	}
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("expected 200 for POST start, got %d", resp.StatusCode)
+	}
+}
+
+func TestCapMemorySwap(t *testing.T) {
+	p := &Policy{Workspace: "/workspace", MaxMemory: 1024, MaxCPUs: 2.0, MaxPids: 1024}
+
+	// MemorySwap=-1 (unlimited) should be capped.
+	body := `{"Image":"alpine","HostConfig":{"MemorySwap":-1}}`
+	result, err := p.ValidateAndSanitize([]byte(body))
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	var raw map[string]json.RawMessage
+	json.Unmarshal(result, &raw)
+	var rawHC map[string]json.RawMessage
+	json.Unmarshal(raw["HostConfig"], &rawHC)
+	var swap int64
+	json.Unmarshal(rawHC["MemorySwap"], &swap)
+	if swap != 1024 {
+		t.Fatalf("expected MemorySwap capped to 1024, got %d", swap)
+	}
+
+	// MemorySwap within limit should pass through.
+	body = `{"Image":"alpine","HostConfig":{"MemorySwap":512}}`
+	result, err = p.ValidateAndSanitize([]byte(body))
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	json.Unmarshal(result, &raw)
+	json.Unmarshal(raw["HostConfig"], &rawHC)
+	json.Unmarshal(rawHC["MemorySwap"], &swap)
+	if swap != 512 {
+		t.Fatalf("expected MemorySwap 512 (within limit), got %d", swap)
+	}
+}
+
+func TestClampCpuPeriod(t *testing.T) {
+	p := &Policy{Workspace: "/workspace", MaxMemory: 2e9, MaxCPUs: 2.0, MaxPids: 1024}
+
+	// CpuPeriod too small — should be clamped to 100000.
+	body := `{"Image":"alpine","HostConfig":{"CpuPeriod":500}}`
+	result, err := p.ValidateAndSanitize([]byte(body))
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	var raw map[string]json.RawMessage
+	json.Unmarshal(result, &raw)
+	var rawHC map[string]json.RawMessage
+	json.Unmarshal(raw["HostConfig"], &rawHC)
+	var period int64
+	json.Unmarshal(rawHC["CpuPeriod"], &period)
+	if period != 100000 {
+		t.Fatalf("expected CpuPeriod clamped to 100000, got %d", period)
+	}
+
+	// CpuPeriod too large — should be clamped.
+	body = `{"Image":"alpine","HostConfig":{"CpuPeriod":9999999}}`
+	result, err = p.ValidateAndSanitize([]byte(body))
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	json.Unmarshal(result, &raw)
+	json.Unmarshal(raw["HostConfig"], &rawHC)
+	json.Unmarshal(rawHC["CpuPeriod"], &period)
+	if period != 100000 {
+		t.Fatalf("expected CpuPeriod clamped to 100000, got %d", period)
+	}
+
+	// Valid CpuPeriod should pass through.
+	body = `{"Image":"alpine","HostConfig":{"CpuPeriod":50000}}`
+	result, err = p.ValidateAndSanitize([]byte(body))
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	json.Unmarshal(result, &raw)
+	json.Unmarshal(raw["HostConfig"], &rawHC)
+	json.Unmarshal(rawHC["CpuPeriod"], &period)
+	if period != 50000 {
+		t.Fatalf("expected CpuPeriod 50000, got %d", period)
+	}
+}
+
+func TestContainerNameValidation(t *testing.T) {
+	containerID := "abcdef1234560000abcdef1234560000abcdef1234560000abcdef12345600ab"
+	var registeredName string
+	podman := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if strings.Contains(r.URL.Path, "/containers/create") {
+			w.WriteHeader(http.StatusCreated)
+			json.NewEncoder(w).Encode(map[string]string{"Id": containerID})
+			return
+		}
+		w.WriteHeader(http.StatusOK)
+		w.Write([]byte("{}"))
+	})
+
+	podmanSock, cleanup1 := mockPodman(t, podman)
+	defer cleanup1()
+
+	sockPath := testSockPath(t, "x")
+	proxy := &Proxy{
+		PodmanSocket: podmanSock,
+		Policy:       defaultPolicy(),
+		Ownership:    NewOwnership(),
+		AgentID:      "test",
+	}
+	listener, err := net.Listen("unix", sockPath)
+	if err != nil {
+		t.Fatalf("listen: %v", err)
+	}
+	server := &http.Server{Handler: proxy}
+	go server.Serve(listener)
+	defer func() { server.Close(); listener.Close() }()
+
+	client := unixClient(sockPath)
+
+	// Create with an invalid name (contains spaces).
+	resp, _ := client.Post(
+		"http://localhost/v4.0.0/containers/create?name=invalid%20name%20with%20spaces",
+		"application/json",
+		strings.NewReader(`{"Image":"alpine"}`),
+	)
+	resp.Body.Close()
+
+	// The container should be owned by ID but not by the invalid name.
+	if proxy.Ownership.Owns(containerID) {
+		// Good — owned by ID.
+	} else {
+		t.Fatal("container should be owned by ID")
+	}
+	if proxy.Ownership.Owns("invalid name with spaces") {
+		t.Fatal("invalid name should not be registered")
+	}
+
+	// Valid name should work.
+	registeredName = ""
+	_ = registeredName
+	resp, _ = client.Post(
+		"http://localhost/v4.0.0/containers/create?name=valid-name.123",
+		"application/json",
+		strings.NewReader(`{"Image":"alpine"}`),
+	)
+	resp.Body.Close()
+	// Second create returns same ID from mock, but name should be registered.
+	if !proxy.Ownership.Owns("valid-name.123") {
+		t.Fatal("valid name should be registered")
+	}
+}
+
 func init() {
 	_ = os.Stderr
 }

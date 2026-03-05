@@ -49,6 +49,7 @@ type hostConfig struct {
 	Binds        []string `json:"Binds,omitempty"`
 	CapAdd       []string `json:"CapAdd,omitempty"`
 	Memory       int64    `json:"Memory,omitempty"`
+	MemorySwap   int64    `json:"MemorySwap,omitempty"`
 	NanoCpus     int64    `json:"NanoCpus,omitempty"`
 	CpuPeriod    int64    `json:"CpuPeriod,omitempty"`
 	CpuQuota     int64    `json:"CpuQuota,omitempty"`
@@ -59,6 +60,14 @@ type hostConfig struct {
 type mountEntry struct {
 	Type   string `json:"Type"`
 	Source string `json:"Source"`
+}
+
+// isUnsafeMode returns true if the namespace mode is "host" or "container:<id>".
+// The "container:" form shares namespaces with another container, enabling
+// cross-tenant access to network, PID, IPC, or UTS namespaces.
+func isUnsafeMode(mode string) bool {
+	lower := strings.ToLower(mode)
+	return lower == "host" || strings.HasPrefix(lower, "container:")
 }
 
 // ValidateAndSanitize checks the container create body against the policy.
@@ -121,17 +130,17 @@ func (p *Policy) ValidateAndSanitize(body []byte) ([]byte, error) {
 		return nil, fmt.Errorf("privileged containers are not allowed")
 	}
 
-	if strings.EqualFold(hc.NetworkMode, "host") {
-		return nil, fmt.Errorf("host network mode is not allowed")
+	if isUnsafeMode(hc.NetworkMode) {
+		return nil, fmt.Errorf("host/container network mode is not allowed")
 	}
-	if strings.EqualFold(hc.PidMode, "host") {
-		return nil, fmt.Errorf("host PID mode is not allowed")
+	if isUnsafeMode(hc.PidMode) {
+		return nil, fmt.Errorf("host/container PID mode is not allowed")
 	}
-	if strings.EqualFold(hc.IpcMode, "host") {
-		return nil, fmt.Errorf("host IPC mode is not allowed")
+	if isUnsafeMode(hc.IpcMode) {
+		return nil, fmt.Errorf("host/container IPC mode is not allowed")
 	}
-	if strings.EqualFold(hc.UTSMode, "host") {
-		return nil, fmt.Errorf("host UTS mode is not allowed")
+	if isUnsafeMode(hc.UTSMode) {
+		return nil, fmt.Errorf("host/container UTS mode is not allowed")
 	}
 	if strings.EqualFold(hc.UsernsMode, "host") {
 		return nil, fmt.Errorf("host user namespace mode is not allowed")
@@ -173,10 +182,23 @@ func (p *Policy) ValidateAndSanitize(body []byte) ([]byte, error) {
 	// Strip Sysctls (blocks arbitrary kernel parameter modification).
 	delete(rawHC, "Sysctls")
 
+	// Strip VolumesFrom — allows mounting volumes from arbitrary containers,
+	// bypassing workspace bind-mount restrictions.
+	delete(rawHC, "VolumesFrom")
+
 	// Cap memory.
 	if p.MaxMemory > 0 && hc.Memory > p.MaxMemory {
 		b, _ := json.Marshal(p.MaxMemory)
 		rawHC["Memory"] = b
+	}
+
+	// Cap MemorySwap. -1 means unlimited swap in Podman.
+	// Set to MaxMemory (disabling swap) to prevent swap-based memory limit bypass.
+	if p.MaxMemory > 0 {
+		if hc.MemorySwap < 0 || hc.MemorySwap > p.MaxMemory {
+			b, _ := json.Marshal(p.MaxMemory)
+			rawHC["MemorySwap"] = b
+		}
 	}
 
 	// Cap CPUs via NanoCpus.
@@ -185,6 +207,12 @@ func (p *Policy) ValidateAndSanitize(body []byte) ([]byte, error) {
 		if hc.NanoCpus > maxNano {
 			b, _ := json.Marshal(maxNano)
 			rawHC["NanoCpus"] = b
+		}
+		// Clamp CpuPeriod to kernel-accepted range (1000-1000000µs).
+		if hc.CpuPeriod != 0 && (hc.CpuPeriod < 1000 || hc.CpuPeriod > 1000000) {
+			hc.CpuPeriod = 100000
+			b, _ := json.Marshal(hc.CpuPeriod)
+			rawHC["CpuPeriod"] = b
 		}
 		// Also cap CpuQuota relative to CpuPeriod.
 		// When CpuPeriod is 0 the kernel defaults to 100000µs.
