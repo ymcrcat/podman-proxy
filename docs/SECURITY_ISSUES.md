@@ -1,6 +1,6 @@
 # Security Issues Found
 
-99 issues found and fixed across 19 rounds of security review. All issues were found through automated code review and fixed with corresponding tests.
+119 issues found and fixed across 20 rounds of security review. All issues were found through automated code review and fixed with corresponding tests.
 
 ## Round 1 — 22 issues (foundational hardening)
 
@@ -156,18 +156,20 @@ Established the core security model.
 
 | Category | Count | Rounds |
 |----------|-------|--------|
-| Resource limits (CPU/memory/PIDs/swap) | 20 | 1, 4, 5, 6, 7, 8, 10, 13, 16, 17, 18, 19 |
+| Resource limits (CPU/memory/PIDs/swap) | 30 | 1, 4, 5, 6, 7, 8, 10, 13, 16, 17, 18, 19, 20 |
 | Namespace escape | 11 | 1, 5, 6, 8 |
-| Filesystem/bind mounts | 8 | 1, 2, 8, 10 |
-| Ownership/isolation | 12 | 1, 3, 9, 12, 13, 17 |
-| Capability/kernel | 8 | 1, 2, 11, 16, 17 |
+| Filesystem/bind mounts | 9 | 1, 2, 8, 10, 20 |
+| Ownership/isolation | 13 | 1, 3, 9, 12, 13, 17, 20 |
+| Capability/kernel | 9 | 1, 2, 11, 16, 17, 20 |
 | Request smuggling/injection | 5 | 2, 4, 13 |
 | API surface/method control | 6 | 1, 4, 5, 9 |
-| Networking | 1 | 12 |
+| Networking | 3 | 12, 20 |
 | Information leaks | 3 | 2, 4, 7 |
 | DoS vectors | 8 | 4, 5, 7, 9, 11 |
 | Input validation | 10 | 5, 6, 7, 11, 12, 13, 16 |
-| Policy bypass | 3 | 13, 15, 16 |
+| Policy bypass | 6 | 13, 15, 16, 20 |
+| Devices | 3 | 20 |
+| Privilege escalation | 2 | 20 |
 
 ## Round 14 — 5 issues
 
@@ -227,6 +229,35 @@ Established the core security model.
 
 **Totals: 28 CRITICAL, 62 IMPORTANT, 9 LOW.**
 
+## Round 20 — 20 issues
+
+Comprehensive HostConfig field audit — every Docker/Podman compat API field reviewed against security impact.
+
+| # | Category | Issue | Severity |
+|---|----------|-------|----------|
+| 1 | Kernel | `LogConfig` passes through — log driver SSRF via syslog/fluentd custom address, host journal flooding via journald driver | IMPORTANT |
+| 2 | Devices | `DeviceCgroupRules` passes through — cgroup device allow rules like `"c 10:200 rwm"` bypass `Devices` stripping | IMPORTANT |
+| 3 | Policy bypass | List endpoint forwards request body to Podman (`nil` body override in `doForward`) — violates body-discard invariant | LOW |
+| 4 | Resources | `OomScoreAdj` passes through — negative values make container immune to OOM killer on rootful Podman, same class as stripped `OomKillDisable` | IMPORTANT |
+| 5 | Devices | `DeviceRequests` passes through — GPU/device driver requests; documented container escape CVEs (CVE-2024-0132, CVE-2025-23266) via NVIDIA Container Toolkit | CRITICAL |
+| 6 | Filesystem | `ContainerIDFile` passes through — daemon writes container ID to attacker-controlled host path (path traversal file overwrite) | IMPORTANT |
+| 7 | Privilege | `GroupAdd` passes through — supplementary groups like `docker`, `disk`, `shadow` escalate privileges with bind-mounted host files | IMPORTANT |
+| 8 | Networking | `ExtraHosts` passes through — /etc/hosts injection enables SSRF by remapping cloud IMDS (169.254.169.254) or internal services | IMPORTANT |
+| 9 | Networking | `Dns`/`DnsSearch`/`DnsOptions` pass through — attacker-controlled DNS resolver enables exfiltration, rebinding, and SSRF | IMPORTANT |
+| 10 | Privilege | `VolumeDriver` passes through — arbitrary volume driver plugins execute with elevated privileges, can bind-mount host paths | IMPORTANT |
+| 11 | Isolation | `Links` passes through — deprecated Docker feature injects env vars and /etc/hosts entries from other containers | LOW |
+| 12 | Policy bypass | `Annotations` passes through — OCI annotations trigger runtime behavior in Podman (e.g., `io.podman.annotations.userns`) | IMPORTANT |
+| 13 | Resources | `CpuRealtimePeriod`/`CpuRealtimeRuntime` pass through — real-time CPU scheduler starves host processes at kernel level | IMPORTANT |
+| 14 | Resources | `CpusetCpus`/`CpusetMems` pass through — CPU/NUMA pinning starves other tenants on specific cores | LOW |
+| 15 | Resources | `KernelMemory` passes through — deprecated; on old kernels with cgroups v1, hitting kmem limit causes host-wide OOM | LOW |
+| 16 | Resources | `MemorySwappiness` passes through — manipulates kernel swap preference, affects other containers' memory reclaim | LOW |
+| 17 | Resources | `MemoryReservation` passes through — soft memory limit affects kernel reclaim priority between containers | LOW |
+| 18 | Resources | `BlkioWeight` and per-device I/O controls pass through — I/O scheduling unfairness, host device topology leak | LOW |
+| 19 | Resources | `CpuShares` passes through — extreme values affect relative CPU scheduling priority under contention | LOW |
+| 20 | Resources | `Cgroup` field passes through (distinct from CgroupParent) — cgroup controller/mode manipulation | LOW |
+
+**Totals: 29 CRITICAL, 72 IMPORTANT, 18 LOW.**
+
 ## Recurring patterns
 
 Several issue patterns recurred across multiple rounds:
@@ -238,3 +269,5 @@ Several issue patterns recurred across multiple rounds:
 **String manipulation on URLs is fragile.** Using `strings.Replace` to rewrite container references in URL paths can match the wrong segment if the container ID appears elsewhere in the path. Structural path building from regex captures is the correct approach. Found in round 4.
 
 **Allowlists are safer than blocklists.** Capabilities, response headers, container actions, and query parameters all use allowlists. Every time a blocklist was used instead, new bypass vectors emerged. The capability allowlist (13 default Docker caps) and per-action method map are examples of this principle applied correctly.
+
+**HostConfig has a vast attack surface.** The Docker/Podman HostConfig object has 50+ fields, many with security implications. Round 20 found 20 unstripped fields in a single audit, including `DeviceRequests` (documented container escape CVEs), `ContainerIDFile` (host file overwrites), `ExtraHosts` (SSRF), and `Dns*` (DNS poisoning). The current blocklist approach requires manually enumerating every dangerous field. A future refactor to an allowlist (keeping only known-safe fields) would be more robust.

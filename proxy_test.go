@@ -3693,6 +3693,351 @@ func TestMountsVolumeOptionsStripped(t *testing.T) {
 	}
 }
 
+func TestStripLogConfig(t *testing.T) {
+	podmanSock, cleanup := mockPodman(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		body, _ := io.ReadAll(r.Body)
+		var raw map[string]json.RawMessage
+		json.Unmarshal(body, &raw)
+		var hc map[string]json.RawMessage
+		json.Unmarshal(raw["HostConfig"], &hc)
+		if _, ok := hc["LogConfig"]; ok {
+			t.Error("LogConfig should have been stripped")
+		}
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(201)
+		w.Write([]byte(`{"Id":"ff00112233445566778899ff00112233445566778899ff00112233445566"}`))
+	}))
+	defer cleanup()
+	proxySock, pCleanup := startProxy(t, podmanSock, defaultPolicy())
+	defer pCleanup()
+	client := unixClient(proxySock)
+
+	resp, err := client.Post("http://localhost/v4.0.0/containers/create", "application/json",
+		strings.NewReader(`{"Image":"alpine","HostConfig":{"LogConfig":{"Type":"syslog","Config":{"syslog-address":"tcp://evil.example.com:514"}}}}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	resp.Body.Close()
+	if resp.StatusCode != 201 {
+		t.Fatalf("expected 201, got %d", resp.StatusCode)
+	}
+}
+
+func TestStripDeviceCgroupRules(t *testing.T) {
+	podmanSock, cleanup := mockPodman(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		body, _ := io.ReadAll(r.Body)
+		var raw map[string]json.RawMessage
+		json.Unmarshal(body, &raw)
+		var hc map[string]json.RawMessage
+		json.Unmarshal(raw["HostConfig"], &hc)
+		if _, ok := hc["DeviceCgroupRules"]; ok {
+			t.Error("DeviceCgroupRules should have been stripped")
+		}
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(201)
+		w.Write([]byte(`{"Id":"ff11223344556677889900ff11223344556677889900ff11223344556677"}`))
+	}))
+	defer cleanup()
+	proxySock, pCleanup := startProxy(t, podmanSock, defaultPolicy())
+	defer pCleanup()
+	client := unixClient(proxySock)
+
+	resp, err := client.Post("http://localhost/v4.0.0/containers/create", "application/json",
+		strings.NewReader(`{"Image":"alpine","HostConfig":{"DeviceCgroupRules":["c 10:200 rwm","b 8:0 rwm"]}}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	resp.Body.Close()
+	if resp.StatusCode != 201 {
+		t.Fatalf("expected 201, got %d", resp.StatusCode)
+	}
+}
+
+func TestStripOomScoreAdj(t *testing.T) {
+	podmanSock, cleanup := mockPodman(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		body, _ := io.ReadAll(r.Body)
+		var raw map[string]json.RawMessage
+		json.Unmarshal(body, &raw)
+		var hc map[string]json.RawMessage
+		json.Unmarshal(raw["HostConfig"], &hc)
+		if _, ok := hc["OomScoreAdj"]; ok {
+			t.Error("OomScoreAdj should have been stripped")
+		}
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(201)
+		w.Write([]byte(`{"Id":"ff22334455667788990011ff22334455667788990011ff22334455667788"}`))
+	}))
+	defer cleanup()
+	proxySock, pCleanup := startProxy(t, podmanSock, defaultPolicy())
+	defer pCleanup()
+	client := unixClient(proxySock)
+
+	resp, err := client.Post("http://localhost/v4.0.0/containers/create", "application/json",
+		strings.NewReader(`{"Image":"alpine","HostConfig":{"OomScoreAdj":-1000}}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	resp.Body.Close()
+	if resp.StatusCode != 201 {
+		t.Fatalf("expected 201, got %d", resp.StatusCode)
+	}
+}
+
+func TestStripDeviceRequests(t *testing.T) {
+	p := defaultPolicy()
+	body := `{"Image":"alpine","HostConfig":{"DeviceRequests":[{"Driver":"nvidia","Count":-1,"Capabilities":[["gpu"]]}]}}`
+	sanitized, err := p.ValidateAndSanitize([]byte(body))
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	var raw map[string]json.RawMessage
+	json.Unmarshal(sanitized, &raw)
+	var hc map[string]json.RawMessage
+	json.Unmarshal(raw["HostConfig"], &hc)
+	if _, ok := hc["DeviceRequests"]; ok {
+		t.Error("DeviceRequests should have been stripped")
+	}
+}
+
+func TestStripContainerIDFile(t *testing.T) {
+	p := defaultPolicy()
+	body := `{"Image":"alpine","HostConfig":{"ContainerIDFile":"/etc/cron.d/backdoor"}}`
+	sanitized, err := p.ValidateAndSanitize([]byte(body))
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	var raw map[string]json.RawMessage
+	json.Unmarshal(sanitized, &raw)
+	var hc map[string]json.RawMessage
+	json.Unmarshal(raw["HostConfig"], &hc)
+	if _, ok := hc["ContainerIDFile"]; ok {
+		t.Error("ContainerIDFile should have been stripped")
+	}
+}
+
+func TestStripGroupAdd(t *testing.T) {
+	p := defaultPolicy()
+	body := `{"Image":"alpine","HostConfig":{"GroupAdd":["docker","disk","shadow"]}}`
+	sanitized, err := p.ValidateAndSanitize([]byte(body))
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	var raw map[string]json.RawMessage
+	json.Unmarshal(sanitized, &raw)
+	var hc map[string]json.RawMessage
+	json.Unmarshal(raw["HostConfig"], &hc)
+	if _, ok := hc["GroupAdd"]; ok {
+		t.Error("GroupAdd should have been stripped")
+	}
+}
+
+func TestStripExtraHosts(t *testing.T) {
+	p := defaultPolicy()
+	body := `{"Image":"alpine","HostConfig":{"ExtraHosts":["metadata.google.internal:169.254.169.254","evil.com:127.0.0.1"]}}`
+	sanitized, err := p.ValidateAndSanitize([]byte(body))
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	var raw map[string]json.RawMessage
+	json.Unmarshal(sanitized, &raw)
+	var hc map[string]json.RawMessage
+	json.Unmarshal(raw["HostConfig"], &hc)
+	if _, ok := hc["ExtraHosts"]; ok {
+		t.Error("ExtraHosts should have been stripped")
+	}
+}
+
+func TestStripDnsConfig(t *testing.T) {
+	p := defaultPolicy()
+	body := `{"Image":"alpine","HostConfig":{"Dns":["8.8.8.8"],"DnsSearch":["attacker.com"],"DnsOptions":["ndots:15"]}}`
+	sanitized, err := p.ValidateAndSanitize([]byte(body))
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	var raw map[string]json.RawMessage
+	json.Unmarshal(sanitized, &raw)
+	var hc map[string]json.RawMessage
+	json.Unmarshal(raw["HostConfig"], &hc)
+	for _, field := range []string{"Dns", "DnsSearch", "DnsOptions"} {
+		if _, ok := hc[field]; ok {
+			t.Errorf("%s should have been stripped", field)
+		}
+	}
+}
+
+func TestStripVolumeDriver(t *testing.T) {
+	p := defaultPolicy()
+	body := `{"Image":"alpine","HostConfig":{"VolumeDriver":"malicious-plugin"}}`
+	sanitized, err := p.ValidateAndSanitize([]byte(body))
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	var raw map[string]json.RawMessage
+	json.Unmarshal(sanitized, &raw)
+	var hc map[string]json.RawMessage
+	json.Unmarshal(raw["HostConfig"], &hc)
+	if _, ok := hc["VolumeDriver"]; ok {
+		t.Error("VolumeDriver should have been stripped")
+	}
+}
+
+func TestStripLinks(t *testing.T) {
+	p := defaultPolicy()
+	body := `{"Image":"alpine","HostConfig":{"Links":["other-container:alias"]}}`
+	sanitized, err := p.ValidateAndSanitize([]byte(body))
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	var raw map[string]json.RawMessage
+	json.Unmarshal(sanitized, &raw)
+	var hc map[string]json.RawMessage
+	json.Unmarshal(raw["HostConfig"], &hc)
+	if _, ok := hc["Links"]; ok {
+		t.Error("Links should have been stripped")
+	}
+}
+
+func TestStripCpuRealtimeScheduler(t *testing.T) {
+	p := defaultPolicy()
+	body := `{"Image":"alpine","HostConfig":{"CpuRealtimePeriod":1000000,"CpuRealtimeRuntime":950000}}`
+	sanitized, err := p.ValidateAndSanitize([]byte(body))
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	var raw map[string]json.RawMessage
+	json.Unmarshal(sanitized, &raw)
+	var hc map[string]json.RawMessage
+	json.Unmarshal(raw["HostConfig"], &hc)
+	for _, field := range []string{"CpuRealtimePeriod", "CpuRealtimeRuntime"} {
+		if _, ok := hc[field]; ok {
+			t.Errorf("%s should have been stripped", field)
+		}
+	}
+}
+
+func TestStripCpusetPinning(t *testing.T) {
+	p := defaultPolicy()
+	body := `{"Image":"alpine","HostConfig":{"CpusetCpus":"0-3","CpusetMems":"0"}}`
+	sanitized, err := p.ValidateAndSanitize([]byte(body))
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	var raw map[string]json.RawMessage
+	json.Unmarshal(sanitized, &raw)
+	var hc map[string]json.RawMessage
+	json.Unmarshal(raw["HostConfig"], &hc)
+	for _, field := range []string{"CpusetCpus", "CpusetMems"} {
+		if _, ok := hc[field]; ok {
+			t.Errorf("%s should have been stripped", field)
+		}
+	}
+}
+
+func TestStripBlkioControls(t *testing.T) {
+	p := defaultPolicy()
+	body := `{"Image":"alpine","HostConfig":{"BlkioWeight":900,"BlkioWeightDevice":[{"Path":"/dev/sda","Weight":999}],"BlkioDeviceReadBps":[{"Path":"/dev/sda","Rate":0}]}}`
+	sanitized, err := p.ValidateAndSanitize([]byte(body))
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	var raw map[string]json.RawMessage
+	json.Unmarshal(sanitized, &raw)
+	var hc map[string]json.RawMessage
+	json.Unmarshal(raw["HostConfig"], &hc)
+	for _, field := range []string{"BlkioWeight", "BlkioWeightDevice", "BlkioDeviceReadBps"} {
+		if _, ok := hc[field]; ok {
+			t.Errorf("%s should have been stripped", field)
+		}
+	}
+}
+
+func TestStripKernelMemory(t *testing.T) {
+	p := defaultPolicy()
+	body := `{"Image":"alpine","HostConfig":{"KernelMemory":1048576}}`
+	sanitized, err := p.ValidateAndSanitize([]byte(body))
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	var raw map[string]json.RawMessage
+	json.Unmarshal(sanitized, &raw)
+	var hc map[string]json.RawMessage
+	json.Unmarshal(raw["HostConfig"], &hc)
+	if _, ok := hc["KernelMemory"]; ok {
+		t.Error("KernelMemory should have been stripped")
+	}
+}
+
+func TestStripMemorySwappiness(t *testing.T) {
+	p := defaultPolicy()
+	body := `{"Image":"alpine","HostConfig":{"MemorySwappiness":0}}`
+	sanitized, err := p.ValidateAndSanitize([]byte(body))
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	var raw map[string]json.RawMessage
+	json.Unmarshal(sanitized, &raw)
+	var hc map[string]json.RawMessage
+	json.Unmarshal(raw["HostConfig"], &hc)
+	if _, ok := hc["MemorySwappiness"]; ok {
+		t.Error("MemorySwappiness should have been stripped")
+	}
+}
+
+func TestStripAnnotations(t *testing.T) {
+	p := defaultPolicy()
+	body := `{"Image":"alpine","HostConfig":{"Annotations":{"io.podman.annotations.userns":"host"}}}`
+	sanitized, err := p.ValidateAndSanitize([]byte(body))
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	var raw map[string]json.RawMessage
+	json.Unmarshal(sanitized, &raw)
+	var hc map[string]json.RawMessage
+	json.Unmarshal(raw["HostConfig"], &hc)
+	if _, ok := hc["Annotations"]; ok {
+		t.Error("Annotations should have been stripped")
+	}
+}
+
+func TestListDiscardsRequestBody(t *testing.T) {
+	containerID := "aabb112233445566778899aabb112233445566778899aabb112233445566"
+	podmanSock, cleanup := mockPodman(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/v4.0.0/containers/create" {
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(201)
+			w.Write([]byte(fmt.Sprintf(`{"Id":"%s"}`, containerID)))
+			return
+		}
+		// List handler — verify no body was forwarded.
+		body, _ := io.ReadAll(r.Body)
+		if len(body) > 0 {
+			t.Errorf("list endpoint should not forward body, got %d bytes: %s", len(body), string(body))
+		}
+		w.Header().Set("Content-Type", "application/json")
+		w.Write([]byte(fmt.Sprintf(`[{"Id":"%s"}]`, containerID)))
+	}))
+	defer cleanup()
+	proxySock, pCleanup := startProxy(t, podmanSock, defaultPolicy())
+	defer pCleanup()
+	client := unixClient(proxySock)
+
+	// Create a container first so the list has something to return.
+	resp, _ := client.Post("http://localhost/v4.0.0/containers/create", "application/json",
+		strings.NewReader(`{"Image":"alpine"}`))
+	resp.Body.Close()
+
+	// Send list request with a body that should be discarded.
+	req, _ := http.NewRequest(http.MethodGet, "http://localhost/v4.0.0/containers/json", strings.NewReader(`{"malicious":"payload"}`))
+	resp, err := client.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	resp.Body.Close()
+	if resp.StatusCode != 200 {
+		t.Fatalf("expected 200, got %d", resp.StatusCode)
+	}
+}
+
 func init() {
 	_ = os.Stderr
 }

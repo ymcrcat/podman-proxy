@@ -247,6 +247,99 @@ func (p *Policy) ValidateAndSanitize(body []byte) ([]byte, error) {
 	// proxy shutdown, evading cleanup and running without ownership tracking.
 	delete(rawHC, "RestartPolicy")
 
+	// Strip LogConfig — prevents tenants from selecting log drivers that
+	// affect the host (journald floods host journal, syslog/fluentd with
+	// custom addresses cause SSRF from the Podman daemon process).
+	delete(rawHC, "LogConfig")
+
+	// Strip DeviceCgroupRules — cgroup device allow rules like "c 10:200 rwm"
+	// grant access to specific devices by major:minor number, bypassing the
+	// Devices field stripping above.
+	delete(rawHC, "DeviceCgroupRules")
+
+	// Strip OomScoreAdj — on rootful Podman, negative values make container
+	// processes immune to the OOM killer (same class as OomKillDisable),
+	// causing the kernel to kill other host or tenant processes instead.
+	delete(rawHC, "OomScoreAdj")
+
+	// Strip DeviceRequests — GPU/device driver requests that bypass Devices
+	// stripping. Documented container escape CVEs via NVIDIA Container Toolkit
+	// (CVE-2024-0132, CVE-2025-23266) allow full host filesystem access.
+	delete(rawHC, "DeviceRequests")
+
+	// Strip ContainerIDFile — writes container ID to a host filesystem path
+	// from the daemon process, enabling path-traversal host file overwrites.
+	delete(rawHC, "ContainerIDFile")
+
+	// Strip GroupAdd — supplementary groups like "docker", "disk", "shadow"
+	// could escalate privileges when combined with bind-mounted host files.
+	delete(rawHC, "GroupAdd")
+
+	// Strip ExtraHosts — injects entries into /etc/hosts, enabling SSRF
+	// by remapping cloud IMDS (169.254.169.254), internal services, or
+	// bypassing URL validation via hostname redirection.
+	delete(rawHC, "ExtraHosts")
+
+	// Strip DNS configuration — Dns, DnsSearch, DnsOptions control the
+	// container's resolver. A malicious DNS server enables exfiltration,
+	// rebinding attacks, and SSRF by poisoning hostname resolution.
+	delete(rawHC, "Dns")
+	delete(rawHC, "DnsSearch")
+	delete(rawHC, "DnsOptions")
+
+	// Strip VolumeDriver — specifies a third-party volume driver plugin.
+	// Plugins execute with elevated privileges and may bind-mount arbitrary
+	// host paths or access cloud storage with host credentials.
+	delete(rawHC, "VolumeDriver")
+
+	// Strip Links — deprecated Docker feature that injects env vars and
+	// /etc/hosts entries from another container, leaking cross-tenant info.
+	delete(rawHC, "Links")
+
+	// Strip Annotations — OCI annotations can trigger runtime behavior
+	// in Podman (e.g., io.podman.annotations.userns) and other runtimes.
+	delete(rawHC, "Annotations")
+
+	// Strip CpuRealtimePeriod/CpuRealtimeRuntime — real-time CPU scheduler
+	// can starve host processes at the kernel scheduler level, bypassing
+	// normal CFS fairness that CpuQuota/NanoCpus operates within.
+	delete(rawHC, "CpuRealtimePeriod")
+	delete(rawHC, "CpuRealtimeRuntime")
+
+	// Strip CpusetCpus/CpusetMems — CPU/NUMA pinning can starve other
+	// tenants or host processes on specific cores/memory nodes.
+	delete(rawHC, "CpusetCpus")
+	delete(rawHC, "CpusetMems")
+
+	// Strip KernelMemory — deprecated since kernel 5.4. On older kernels
+	// with cgroups v1, hitting the kmem limit causes host-wide OOM.
+	delete(rawHC, "KernelMemory")
+
+	// Strip MemorySwappiness — manipulates kernel swap preference for this
+	// container, affecting other containers' memory reclaim behavior.
+	delete(rawHC, "MemorySwappiness")
+
+	// Strip MemoryReservation — soft memory limit that affects kernel
+	// reclaim priority between containers under memory pressure.
+	delete(rawHC, "MemoryReservation")
+
+	// Strip BlkioWeight and per-device I/O controls — affects I/O scheduling
+	// fairness and leaks host block device topology.
+	delete(rawHC, "BlkioWeight")
+	delete(rawHC, "BlkioWeightDevice")
+	delete(rawHC, "BlkioDeviceReadBps")
+	delete(rawHC, "BlkioDeviceWriteBps")
+	delete(rawHC, "BlkioDeviceReadIOps")
+	delete(rawHC, "BlkioDeviceWriteIOps")
+
+	// Strip CpuShares — relative CPU scheduling weight. While bounded by
+	// NanoCpus, extreme values affect scheduling priority under contention.
+	delete(rawHC, "CpuShares")
+
+	// Strip Cgroup — cgroup controller/mode string (distinct from CgroupParent).
+	// Could attach container to a cgroup with excessive resource quotas.
+	delete(rawHC, "Cgroup")
+
 	// Cap memory. Always enforce when MaxMemory is configured (Memory=0 means
 	// unlimited in Podman, which would bypass the limit).
 	effectiveMemory := hc.Memory

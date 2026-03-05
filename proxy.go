@@ -281,8 +281,13 @@ func (p *Proxy) handleList(w http.ResponseWriter, r *http.Request) {
 	}
 	listURL.RawQuery = q.Encode()
 	listReq.URL = &listURL
+	// Discard the request body — list is a GET endpoint with no meaningful
+	// body, and forwarding it would violate the body-discard invariant
+	// established for non-create endpoints.
+	listReq.Body = http.NoBody
+	listReq.ContentLength = 0
 
-	resp, respBody, err := p.doForward(&listReq, nil)
+	resp, respBody, err := p.doForward(&listReq, []byte{})
 	if err != nil {
 		http.Error(w, fmt.Sprintf("upstream error: %v", err), http.StatusBadGateway)
 		return
