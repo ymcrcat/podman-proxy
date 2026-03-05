@@ -58,7 +58,7 @@ func main() {
 	if err != nil {
 		log.Fatalf("Failed to listen on %s: %v", *listenPath, err)
 	}
-	if err := os.Chmod(*listenPath, 0666); err != nil {
+	if err := os.Chmod(*listenPath, 0660); err != nil {
 		log.Printf("Warning: could not chmod socket: %v", err)
 	}
 

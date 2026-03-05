@@ -195,41 +195,30 @@ func (p *Policy) ValidateAndSanitize(body []byte) ([]byte, error) {
 		}
 	}
 
-	// Cap MemorySwap. -1 means unlimited swap in Podman.
-	// Set to MaxMemory (disabling swap) to prevent swap-based memory limit bypass.
+	// Cap MemorySwap. 0 or -1 means unlimited swap in Podman.
+	// Always enforce to MaxMemory (disabling swap) to prevent swap-based memory limit bypass.
 	if p.MaxMemory > 0 {
-		if hc.MemorySwap < 0 || hc.MemorySwap > p.MaxMemory {
+		if hc.MemorySwap <= 0 || hc.MemorySwap > p.MaxMemory {
 			b, _ := json.Marshal(p.MaxMemory)
 			rawHC["MemorySwap"] = b
 		}
 	}
 
-	// Cap CPUs via NanoCpus.
+	// Cap CPUs via NanoCpus. Always enforce when MaxCPUs is configured
+	// (NanoCpus=0 means unlimited in Podman, which would bypass the limit).
+	// Delete CpuQuota and CpuPeriod since Podman rejects requests that set
+	// both NanoCpus and CpuQuota/CpuPeriod simultaneously. NanoCpus is the
+	// higher-level API that Podman converts to CFS parameters internally.
 	if p.MaxCPUs > 0 {
 		maxNano := int64(p.MaxCPUs * 1e9)
-		if hc.NanoCpus > maxNano {
+		if hc.NanoCpus <= 0 || hc.NanoCpus > maxNano {
 			b, _ := json.Marshal(maxNano)
 			rawHC["NanoCpus"] = b
 		}
-		// Clamp CpuPeriod to kernel-accepted range (1000-1000000µs).
-		if hc.CpuPeriod != 0 && (hc.CpuPeriod < 1000 || hc.CpuPeriod > 1000000) {
-			hc.CpuPeriod = 100000
-			b, _ := json.Marshal(hc.CpuPeriod)
-			rawHC["CpuPeriod"] = b
-		}
-		// Also cap CpuQuota relative to CpuPeriod.
-		// When CpuPeriod is 0 the kernel defaults to 100000µs.
-		if hc.CpuQuota > 0 {
-			period := hc.CpuPeriod
-			if period <= 0 {
-				period = 100000 // kernel default
-			}
-			maxQuota := int64(p.MaxCPUs * float64(period))
-			if hc.CpuQuota > maxQuota {
-				b, _ := json.Marshal(maxQuota)
-				rawHC["CpuQuota"] = b
-			}
-		}
+		// Remove CpuQuota/CpuPeriod to prevent conflict with NanoCpus.
+		// This also closes the CpuQuota<=0 bypass since NanoCpus is always enforced.
+		delete(rawHC, "CpuQuota")
+		delete(rawHC, "CpuPeriod")
 	}
 
 	// Enforce PidsLimit to prevent fork bomb DoS.

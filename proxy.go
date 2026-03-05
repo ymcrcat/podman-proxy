@@ -18,6 +18,7 @@ import (
 const (
 	maxRequestBody      = 10 * 1024 * 1024  // 10 MB
 	maxResponseBody     = 128 * 1024 * 1024 // 128 MB
+	maxStreamBytes      = 512 * 1024 * 1024 // 512 MB per streaming connection
 	clientTimeout       = 60 * time.Second
 	dialTimeout         = 5 * time.Second
 	maxConcurrentStream = 20 // max simultaneous streaming connections (logs, stats)
@@ -188,12 +189,18 @@ func (p *Proxy) handleCreate(w http.ResponseWriter, r *http.Request) {
 }
 
 func (p *Proxy) handleList(w http.ResponseWriter, r *http.Request) {
-	// Strip expensive query parameters to prevent DoS via Podman-side computation.
-	// "size=1" forces Podman to calculate disk usage for every container.
+	// Only pass allowlisted query parameters. Strip filters (tenant-controlled JSON
+	// forwarded to Podman's filter parser), size (forces disk usage computation),
+	// and any other unknown parameters.
 	listReq := *r
 	listURL := *r.URL
 	q := listURL.Query()
-	q.Del("size")
+	allowedListParams := map[string]bool{"all": true, "limit": true}
+	for k := range q {
+		if !allowedListParams[k] {
+			q.Del(k)
+		}
+	}
 	listURL.RawQuery = q.Encode()
 	listReq.URL = &listURL
 
@@ -433,12 +440,18 @@ func (p *Proxy) streamForward(w http.ResponseWriter, r *http.Request) {
 	copyFilteredHeaders(w, resp)
 	w.WriteHeader(resp.StatusCode)
 
-	// Flush-aware copy for streaming.
+	// Flush-aware copy for streaming with per-connection byte limit.
 	flusher, canFlush := w.(http.Flusher)
 	buf := make([]byte, 32*1024)
+	var totalWritten int64
 	for {
 		n, readErr := resp.Body.Read(buf)
 		if n > 0 {
+			totalWritten += int64(n)
+			if totalWritten > maxStreamBytes {
+				log.Printf("[%s] stream byte limit exceeded (%d bytes), closing", p.AgentID, maxStreamBytes)
+				break
+			}
 			w.Write(buf[:n])
 			if canFlush {
 				flusher.Flush()

@@ -350,9 +350,9 @@ func TestCapNanoCpus(t *testing.T) {
 	}
 }
 
-func TestCapCpuQuotaWithoutPeriod(t *testing.T) {
+func TestCpuQuotaStrippedWithoutPeriod(t *testing.T) {
 	p := &Policy{Workspace: "/workspace", MaxMemory: 2e9, MaxCPUs: 1.0}
-	// CpuQuota without CpuPeriod — should be capped using kernel default period (100000).
+	// CpuQuota should be stripped when MaxCPUs is configured (NanoCpus is used instead).
 	body := `{"Image":"alpine","HostConfig":{"CpuQuota":9999999}}`
 	result, err := p.ValidateAndSanitize([]byte(body))
 	if err != nil {
@@ -362,11 +362,15 @@ func TestCapCpuQuotaWithoutPeriod(t *testing.T) {
 	json.Unmarshal(result, &raw)
 	var rawHC map[string]json.RawMessage
 	json.Unmarshal(raw["HostConfig"], &rawHC)
-	var quota int64
-	json.Unmarshal(rawHC["CpuQuota"], &quota)
-	// MaxCPUs=1.0, default period=100000, so max quota = 100000
-	if quota != 100000 {
-		t.Fatalf("expected CpuQuota capped to 100000, got %d", quota)
+	if _, ok := rawHC["CpuQuota"]; ok {
+		t.Fatal("CpuQuota should be stripped when MaxCPUs is configured")
+	}
+	// NanoCpus should be enforced instead.
+	var nano int64
+	json.Unmarshal(rawHC["NanoCpus"], &nano)
+	expected := int64(1.0 * 1e9)
+	if nano != expected {
+		t.Fatalf("expected NanoCpus=%d, got %d", expected, nano)
 	}
 }
 
@@ -1449,7 +1453,7 @@ func TestListStripsSizeParam(t *testing.T) {
 	defer cleanup2()
 
 	client := unixClient(proxySock)
-	resp, err := client.Get("http://localhost/v4.0.0/containers/json?all=1&size=1")
+	resp, err := client.Get("http://localhost/v4.0.0/containers/json?all=1&size=1&filters=%7B%22name%22%3A%5B%22evil%22%5D%7D&limit=10")
 	if err != nil {
 		t.Fatalf("list: %v", err)
 	}
@@ -1458,8 +1462,14 @@ func TestListStripsSizeParam(t *testing.T) {
 	if strings.Contains(receivedQuery, "size") {
 		t.Fatalf("size param should be stripped, but podman received query: %s", receivedQuery)
 	}
+	if strings.Contains(receivedQuery, "filters") {
+		t.Fatalf("filters param should be stripped, but podman received query: %s", receivedQuery)
+	}
 	if !strings.Contains(receivedQuery, "all=1") {
-		t.Fatalf("non-size params should be preserved, but podman received query: %s", receivedQuery)
+		t.Fatalf("all param should be preserved, but podman received query: %s", receivedQuery)
+	}
+	if !strings.Contains(receivedQuery, "limit=10") {
+		t.Fatalf("limit param should be preserved, but podman received query: %s", receivedQuery)
 	}
 }
 
@@ -1720,11 +1730,11 @@ func TestCapMemorySwap(t *testing.T) {
 	}
 }
 
-func TestClampCpuPeriod(t *testing.T) {
+func TestCpuPeriodStrippedWhenMaxCPUs(t *testing.T) {
 	p := &Policy{Workspace: "/workspace", MaxMemory: 2e9, MaxCPUs: 2.0, MaxPids: 1024}
 
-	// CpuPeriod too small — should be clamped to 100000.
-	body := `{"Image":"alpine","HostConfig":{"CpuPeriod":500}}`
+	// CpuPeriod should be stripped when MaxCPUs is configured (NanoCpus is used instead).
+	body := `{"Image":"alpine","HostConfig":{"CpuPeriod":50000}}`
 	result, err := p.ValidateAndSanitize([]byte(body))
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
@@ -1733,36 +1743,19 @@ func TestClampCpuPeriod(t *testing.T) {
 	json.Unmarshal(result, &raw)
 	var rawHC map[string]json.RawMessage
 	json.Unmarshal(raw["HostConfig"], &rawHC)
-	var period int64
-	json.Unmarshal(rawHC["CpuPeriod"], &period)
-	if period != 100000 {
-		t.Fatalf("expected CpuPeriod clamped to 100000, got %d", period)
+	if _, ok := rawHC["CpuPeriod"]; ok {
+		t.Fatal("CpuPeriod should be stripped when MaxCPUs is configured")
+	}
+	if _, ok := rawHC["CpuQuota"]; ok {
+		t.Fatal("CpuQuota should be stripped when MaxCPUs is configured")
 	}
 
-	// CpuPeriod too large — should be clamped.
-	body = `{"Image":"alpine","HostConfig":{"CpuPeriod":9999999}}`
-	result, err = p.ValidateAndSanitize([]byte(body))
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
-	json.Unmarshal(result, &raw)
-	json.Unmarshal(raw["HostConfig"], &rawHC)
-	json.Unmarshal(rawHC["CpuPeriod"], &period)
-	if period != 100000 {
-		t.Fatalf("expected CpuPeriod clamped to 100000, got %d", period)
-	}
-
-	// Valid CpuPeriod should pass through.
-	body = `{"Image":"alpine","HostConfig":{"CpuPeriod":50000}}`
-	result, err = p.ValidateAndSanitize([]byte(body))
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
-	json.Unmarshal(result, &raw)
-	json.Unmarshal(raw["HostConfig"], &rawHC)
-	json.Unmarshal(rawHC["CpuPeriod"], &period)
-	if period != 50000 {
-		t.Fatalf("expected CpuPeriod 50000, got %d", period)
+	// NanoCpus should be enforced.
+	var nano int64
+	json.Unmarshal(rawHC["NanoCpus"], &nano)
+	expected := int64(2.0 * 1e9)
+	if nano != expected {
+		t.Fatalf("expected NanoCpus=%d, got %d", expected, nano)
 	}
 }
 
@@ -2020,6 +2013,241 @@ func TestMemoryZeroEnforced(t *testing.T) {
 	json.Unmarshal(hc["Memory"], &mem)
 	if mem != 536870912 {
 		t.Fatalf("Memory within limit should pass through, got %d", mem)
+	}
+}
+
+func TestNanoCpusZeroEnforced(t *testing.T) {
+	var capturedBody []byte
+	const containerID = "abc123def456789012345678abc123def456789012345678abc123def4567890"
+
+	podmanSock, cleanup := mockPodman(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		capturedBody, _ = io.ReadAll(r.Body)
+		w.Header().Set("Content-Type", "application/json")
+		fmt.Fprintf(w, `{"Id":"%s"}`, containerID)
+	}))
+	defer cleanup()
+
+	policy := defaultPolicy()
+	policy.MaxCPUs = 2.0
+
+	proxySock, pcleanup := startProxy(t, podmanSock, policy)
+	defer pcleanup()
+
+	client := unixClient(proxySock)
+
+	// NanoCpus=0 should be set to MaxCPUs (0 means unlimited in Podman).
+	resp, _ := client.Post(
+		"http://localhost/v4.0.0/containers/create",
+		"application/json",
+		strings.NewReader(`{"Image":"alpine","HostConfig":{"NanoCpus":0}}`),
+	)
+	resp.Body.Close()
+
+	var body map[string]json.RawMessage
+	json.Unmarshal(capturedBody, &body)
+	var hc map[string]json.RawMessage
+	json.Unmarshal(body["HostConfig"], &hc)
+	var nano int64
+	json.Unmarshal(hc["NanoCpus"], &nano)
+	expected := int64(2.0 * 1e9)
+	if nano != expected {
+		t.Fatalf("NanoCpus=0 should be capped to %d, got %d", expected, nano)
+	}
+
+	// Omitted NanoCpus should also be enforced.
+	resp, _ = client.Post(
+		"http://localhost/v4.0.0/containers/create",
+		"application/json",
+		strings.NewReader(`{"Image":"alpine"}`),
+	)
+	resp.Body.Close()
+
+	json.Unmarshal(capturedBody, &body)
+	json.Unmarshal(body["HostConfig"], &hc)
+	json.Unmarshal(hc["NanoCpus"], &nano)
+	if nano != expected {
+		t.Fatalf("omitted NanoCpus should be capped to %d, got %d", expected, nano)
+	}
+
+	// NanoCpus within limit should pass through.
+	resp, _ = client.Post(
+		"http://localhost/v4.0.0/containers/create",
+		"application/json",
+		strings.NewReader(`{"Image":"alpine","HostConfig":{"NanoCpus":1000000000}}`),
+	)
+	resp.Body.Close()
+
+	json.Unmarshal(capturedBody, &body)
+	json.Unmarshal(body["HostConfig"], &hc)
+	json.Unmarshal(hc["NanoCpus"], &nano)
+	if nano != 1000000000 {
+		t.Fatalf("NanoCpus within limit should pass through, got %d", nano)
+	}
+}
+
+func TestMemorySwapZeroEnforced(t *testing.T) {
+	var capturedBody []byte
+	const containerID = "abc123def456789012345678abc123def456789012345678abc123def4567890"
+
+	podmanSock, cleanup := mockPodman(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		capturedBody, _ = io.ReadAll(r.Body)
+		w.Header().Set("Content-Type", "application/json")
+		fmt.Fprintf(w, `{"Id":"%s"}`, containerID)
+	}))
+	defer cleanup()
+
+	policy := defaultPolicy()
+	policy.MaxMemory = 1024 * 1024 * 1024 // 1GB
+
+	proxySock, pcleanup := startProxy(t, podmanSock, policy)
+	defer pcleanup()
+
+	client := unixClient(proxySock)
+
+	// MemorySwap=0 should be set to MaxMemory.
+	resp, _ := client.Post(
+		"http://localhost/v4.0.0/containers/create",
+		"application/json",
+		strings.NewReader(`{"Image":"alpine","HostConfig":{"MemorySwap":0}}`),
+	)
+	resp.Body.Close()
+
+	var body map[string]json.RawMessage
+	json.Unmarshal(capturedBody, &body)
+	var hc map[string]json.RawMessage
+	json.Unmarshal(body["HostConfig"], &hc)
+	var swap int64
+	json.Unmarshal(hc["MemorySwap"], &swap)
+	if swap != policy.MaxMemory {
+		t.Fatalf("MemorySwap=0 should be capped to %d, got %d", policy.MaxMemory, swap)
+	}
+}
+
+func TestCpuQuotaAndPeriodStripped(t *testing.T) {
+	var capturedBody []byte
+	const containerID = "abc123def456789012345678abc123def456789012345678abc123def4567890"
+
+	podmanSock, cleanup := mockPodman(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		capturedBody, _ = io.ReadAll(r.Body)
+		w.Header().Set("Content-Type", "application/json")
+		fmt.Fprintf(w, `{"Id":"%s"}`, containerID)
+	}))
+	defer cleanup()
+
+	policy := defaultPolicy()
+	policy.MaxCPUs = 2.0
+
+	proxySock, pcleanup := startProxy(t, podmanSock, policy)
+	defer pcleanup()
+
+	client := unixClient(proxySock)
+
+	// CpuQuota and CpuPeriod should be stripped (Podman rejects NanoCpus + CpuQuota).
+	// NanoCpus is always enforced instead.
+	resp, _ := client.Post(
+		"http://localhost/v4.0.0/containers/create",
+		"application/json",
+		strings.NewReader(`{"Image":"alpine","HostConfig":{"CpuQuota":500000,"CpuPeriod":100000}}`),
+	)
+	resp.Body.Close()
+
+	var body map[string]json.RawMessage
+	json.Unmarshal(capturedBody, &body)
+	var hc map[string]json.RawMessage
+	json.Unmarshal(body["HostConfig"], &hc)
+
+	if _, ok := hc["CpuQuota"]; ok {
+		t.Fatal("CpuQuota should be stripped when MaxCPUs is configured")
+	}
+	if _, ok := hc["CpuPeriod"]; ok {
+		t.Fatal("CpuPeriod should be stripped when MaxCPUs is configured")
+	}
+
+	// NanoCpus should be enforced.
+	var nano int64
+	json.Unmarshal(hc["NanoCpus"], &nano)
+	expected := int64(2.0 * 1e9)
+	if nano != expected {
+		t.Fatalf("NanoCpus should be enforced to %d, got %d", expected, nano)
+	}
+}
+
+func TestStreamByteLimit(t *testing.T) {
+	const containerID = "abcdef1234560000abcdef1234560000abcdef1234560000abcdef12345600ab"
+
+	// Mock podman that streams more data than the limit.
+	podman := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if strings.Contains(r.URL.Path, "/containers/create") {
+			w.WriteHeader(http.StatusCreated)
+			json.NewEncoder(w).Encode(map[string]string{"Id": containerID})
+			return
+		}
+		if strings.Contains(r.URL.Path, "/logs") {
+			w.Header().Set("Content-Type", "application/octet-stream")
+			w.WriteHeader(http.StatusOK)
+			flusher, _ := w.(http.Flusher)
+			// Write 1 MB chunks. The proxy limit is 512 MB, so write 600 MB.
+			chunk := make([]byte, 1024*1024)
+			for i := 0; i < 600; i++ {
+				_, err := w.Write(chunk)
+				if err != nil {
+					return // proxy closed connection
+				}
+				if flusher != nil {
+					flusher.Flush()
+				}
+			}
+			return
+		}
+		w.WriteHeader(http.StatusOK)
+	})
+
+	podmanSock, cleanup1 := mockPodman(t, podman)
+	defer cleanup1()
+
+	sockPath := testSockPath(t, "x")
+	proxy := &Proxy{
+		PodmanSocket: podmanSock,
+		Policy:       defaultPolicy(),
+		Ownership:    NewOwnership(),
+		AgentID:      "test",
+		streamSem:    make(chan struct{}, maxConcurrentStream),
+	}
+	listener, err := net.Listen("unix", sockPath)
+	if err != nil {
+		t.Fatalf("listen: %v", err)
+	}
+	server := &http.Server{Handler: proxy}
+	go server.Serve(listener)
+	defer func() { server.Close(); listener.Close() }()
+
+	// Create and register the container.
+	client := unixClient(sockPath)
+	resp, _ := client.Post(
+		"http://localhost/v4.0.0/containers/create",
+		"application/json",
+		strings.NewReader(`{"Image":"alpine"}`),
+	)
+	resp.Body.Close()
+
+	// Request logs — should be truncated at maxStreamBytes.
+	resp, err = client.Get("http://localhost/v4.0.0/containers/" + containerID + "/logs?stdout=true")
+	if err != nil {
+		t.Fatalf("logs request failed: %v", err)
+	}
+	body, _ := io.ReadAll(resp.Body)
+	resp.Body.Close()
+
+	// The proxy should have cut off the stream at ~512 MB.
+	// Allow some slack for the read buffer (up to 32KB over).
+	maxExpected := int64(512*1024*1024 + 32*1024)
+	if int64(len(body)) > maxExpected {
+		t.Fatalf("stream should be capped at ~512MB, got %d bytes", len(body))
+	}
+	// Should have received a substantial amount (at least 500 MB).
+	minExpected := int64(500 * 1024 * 1024)
+	if int64(len(body)) < minExpected {
+		t.Fatalf("expected at least %d bytes, got %d", minExpected, len(body))
 	}
 }
 
