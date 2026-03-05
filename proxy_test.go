@@ -80,6 +80,7 @@ func defaultPolicy() *Policy {
 		Workspace: "/workspace",
 		MaxMemory: 2 * 1024 * 1024 * 1024,
 		MaxCPUs:   2.0,
+		MaxPids:   1024,
 	}
 }
 
@@ -519,14 +520,14 @@ func TestPolicyValidateBindsTraversal(t *testing.T) {
 func TestProxyCreateAndList(t *testing.T) {
 	podman := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if strings.Contains(r.URL.Path, "/containers/create") {
-			id := "abc123def456789012345678"
+			id := "abc123def456789012345678abc123def456789012345678abc123def4567890"
 			w.WriteHeader(http.StatusCreated)
 			json.NewEncoder(w).Encode(map[string]string{"Id": id})
 			return
 		}
 		if strings.Contains(r.URL.Path, "/containers/json") {
 			containers := []map[string]interface{}{
-				{"Id": "abc123def456789012345678", "Names": []string{"/my-container"}},
+				{"Id": "abc123def456789012345678abc123def456789012345678abc123def4567890", "Names": []string{"/my-container"}},
 				{"Id": "other999888777666555444", "Names": []string{"/not-mine"}},
 			}
 			w.WriteHeader(http.StatusOK)
@@ -569,7 +570,7 @@ func TestProxyCreateAndList(t *testing.T) {
 	if len(listed) != 1 {
 		t.Fatalf("expected 1 container in list, got %d", len(listed))
 	}
-	if listed[0]["Id"] != "abc123def456789012345678" {
+	if listed[0]["Id"] != "abc123def456789012345678abc123def456789012345678abc123def4567890" {
 		t.Fatalf("unexpected container in list: %v", listed[0]["Id"])
 	}
 }
@@ -654,7 +655,7 @@ func TestProxyBlocksForbiddenEndpoints(t *testing.T) {
 }
 
 func TestProxyBlocksExecAndUpdate(t *testing.T) {
-	containerID := "abc123def456789012345678"
+	containerID := "abc123def456789012345678abc123def456789012345678abc123def4567890"
 	podman := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if strings.Contains(r.URL.Path, "/containers/create") {
 			w.WriteHeader(http.StatusCreated)
@@ -739,7 +740,7 @@ func TestProxyAllowsPing(t *testing.T) {
 }
 
 func TestProxyAllowsOwnedContainerOps(t *testing.T) {
-	containerID := "abc123def456789012345678"
+	containerID := "abc123def456789012345678abc123def456789012345678abc123def4567890"
 	podman := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if strings.Contains(r.URL.Path, "/containers/create") {
 			w.WriteHeader(http.StatusCreated)
@@ -802,7 +803,7 @@ func TestProxyResourceCapping(t *testing.T) {
 		body, _ := io.ReadAll(r.Body)
 		json.Unmarshal(body, &receivedBody)
 		w.WriteHeader(http.StatusCreated)
-		json.NewEncoder(w).Encode(map[string]string{"Id": "test1234567890ab"})
+		json.NewEncoder(w).Encode(map[string]string{"Id": "def0123456789abcdef0123456789abcdef0123456789abcdef012345678abcd"})
 	})
 
 	podmanSock, cleanup1 := mockPodman(t, podman)
@@ -858,7 +859,7 @@ func TestProxyResourceCapping(t *testing.T) {
 }
 
 func TestProxyContainerRemoveUntracks(t *testing.T) {
-	containerID := "abc123def456789012345678"
+	containerID := "abc123def456789012345678abc123def456789012345678abc123def4567890"
 	podman := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if strings.Contains(r.URL.Path, "/containers/create") {
 			w.WriteHeader(http.StatusCreated)
@@ -906,7 +907,7 @@ func TestProxyContainerRemoveUntracks(t *testing.T) {
 }
 
 func TestProxyRemoveDoesNotUntrackOnError(t *testing.T) {
-	containerID := "abc123def456789012345678"
+	containerID := "abc123def456789012345678abc123def456789012345678abc123def4567890"
 	podman := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if strings.Contains(r.URL.Path, "/containers/create") {
 			w.WriteHeader(http.StatusCreated)
@@ -954,7 +955,7 @@ func TestProxyRemoveDoesNotUntrackOnError(t *testing.T) {
 }
 
 func TestProxyTracksContainerName(t *testing.T) {
-	containerID := "abc123def456789012345678"
+	containerID := "abc123def456789012345678abc123def456789012345678abc123def4567890"
 	podman := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if strings.Contains(r.URL.Path, "/containers/create") {
 			w.WriteHeader(http.StatusCreated)
@@ -993,7 +994,7 @@ func TestProxyTracksContainerName(t *testing.T) {
 }
 
 func TestProxyRewritesContainerRefToFullID(t *testing.T) {
-	containerID := "abc123def456789012345678"
+	containerID := "abc123def456789012345678abc123def456789012345678abc123def4567890"
 	var receivedPath string
 	podman := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if strings.Contains(r.URL.Path, "/containers/create") {
@@ -1047,7 +1048,7 @@ func TestProxyRewritesContainerRefToFullID(t *testing.T) {
 }
 
 func TestProxyRenameUpdatesOwnership(t *testing.T) {
-	containerID := "abc123def456789012345678"
+	containerID := "abc123def456789012345678abc123def456789012345678abc123def4567890"
 	podman := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if strings.Contains(r.URL.Path, "/containers/create") {
 			w.WriteHeader(http.StatusCreated)
@@ -1153,7 +1154,7 @@ func TestProxyListDoesNotLeakHeaders(t *testing.T) {
 }
 
 func TestProxyStreamingLogs(t *testing.T) {
-	containerID := "abc123def456789012345678"
+	containerID := "abc123def456789012345678abc123def456789012345678abc123def4567890"
 	logOutput := "line1\nline2\nline3\n"
 	podman := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if strings.Contains(r.URL.Path, "/containers/create") {
@@ -1199,6 +1200,390 @@ func TestProxyStreamingLogs(t *testing.T) {
 	if string(body) != logOutput {
 		t.Fatalf("expected log output %q, got %q", logOutput, string(body))
 	}
+}
+
+// --- Round 4 security fix tests ---
+
+func TestPidsLimitEnforced(t *testing.T) {
+	p := &Policy{Workspace: "/workspace", MaxMemory: 2e9, MaxCPUs: 2.0, MaxPids: 512}
+
+	// Tenant requests unlimited PIDs — should be capped.
+	body := `{"Image":"alpine","HostConfig":{"PidsLimit":-1}}`
+	result, err := p.ValidateAndSanitize([]byte(body))
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	var raw map[string]json.RawMessage
+	json.Unmarshal(result, &raw)
+	var rawHC map[string]json.RawMessage
+	json.Unmarshal(raw["HostConfig"], &rawHC)
+	var pids int64
+	json.Unmarshal(rawHC["PidsLimit"], &pids)
+	if pids != 512 {
+		t.Fatalf("expected PidsLimit capped to 512, got %d", pids)
+	}
+
+	// Tenant requests no PidsLimit (omitted) — should be set.
+	body = `{"Image":"alpine","HostConfig":{"NetworkMode":"bridge"}}`
+	result, err = p.ValidateAndSanitize([]byte(body))
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	json.Unmarshal(result, &raw)
+	json.Unmarshal(raw["HostConfig"], &rawHC)
+	json.Unmarshal(rawHC["PidsLimit"], &pids)
+	if pids != 512 {
+		t.Fatalf("expected PidsLimit set to 512 when omitted, got %d", pids)
+	}
+
+	// Tenant requests within limit — should pass through.
+	body = `{"Image":"alpine","HostConfig":{"PidsLimit":100}}`
+	result, err = p.ValidateAndSanitize([]byte(body))
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	json.Unmarshal(result, &raw)
+	json.Unmarshal(raw["HostConfig"], &rawHC)
+	json.Unmarshal(rawHC["PidsLimit"], &pids)
+	if pids != 100 {
+		t.Fatalf("expected PidsLimit 100 (within limit), got %d", pids)
+	}
+}
+
+func TestStructuralPathRewriteContainersName(t *testing.T) {
+	// Container named "containers" — the old strings.Replace approach
+	// would replace the wrong "/containers" segment in the path.
+	containerID := "abcdef1234560000abcdef1234560000abcdef1234560000abcdef12345600ab"
+	var receivedPath string
+	podman := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if strings.Contains(r.URL.Path, "/containers/create") {
+			w.WriteHeader(http.StatusCreated)
+			json.NewEncoder(w).Encode(map[string]string{"Id": containerID})
+			return
+		}
+		receivedPath = r.URL.Path
+		w.WriteHeader(http.StatusOK)
+		w.Write([]byte("{}"))
+	})
+
+	podmanSock, cleanup1 := mockPodman(t, podman)
+	defer cleanup1()
+
+	proxySock, cleanup2 := startProxy(t, podmanSock, defaultPolicy())
+	defer cleanup2()
+
+	client := unixClient(proxySock)
+
+	// Create container with name "containers".
+	resp, _ := client.Post(
+		"http://localhost/v4.0.0/containers/create?name=containers",
+		"application/json",
+		strings.NewReader(`{"Image":"alpine"}`),
+	)
+	resp.Body.Close()
+
+	// Access by name "containers" — path must still be correctly formed.
+	resp, err := client.Post("http://localhost/v4.0.0/containers/containers/start", "", nil)
+	if err != nil {
+		t.Fatalf("start: %v", err)
+	}
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("expected 200, got %d", resp.StatusCode)
+	}
+	expected := "/v4.0.0/containers/" + containerID + "/start"
+	if receivedPath != expected {
+		t.Fatalf("expected podman to receive %q, got %q", expected, receivedPath)
+	}
+}
+
+func TestXRegistryAuthStripped(t *testing.T) {
+	var receivedAuth string
+	podman := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		receivedAuth = r.Header.Get("X-Registry-Auth")
+		if strings.Contains(r.URL.Path, "/containers/create") {
+			w.WriteHeader(http.StatusCreated)
+			json.NewEncoder(w).Encode(map[string]string{"Id": "abcdef1234560000abcdef1234560000abcdef1234560000abcdef12345600ab"})
+			return
+		}
+		w.WriteHeader(http.StatusOK)
+	})
+
+	podmanSock, cleanup1 := mockPodman(t, podman)
+	defer cleanup1()
+
+	proxySock, cleanup2 := startProxy(t, podmanSock, defaultPolicy())
+	defer cleanup2()
+
+	client := unixClient(proxySock)
+
+	req, _ := http.NewRequest(http.MethodPost, "http://localhost/v4.0.0/containers/create", strings.NewReader(`{"Image":"alpine"}`))
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("X-Registry-Auth", "eyJzZWNyZXQiOiAidG9rZW4ifQ==")
+	resp, err := client.Do(req)
+	if err != nil {
+		t.Fatalf("request: %v", err)
+	}
+	resp.Body.Close()
+
+	if receivedAuth != "" {
+		t.Fatalf("X-Registry-Auth should have been stripped, but podman received %q", receivedAuth)
+	}
+}
+
+func TestEmptyActionMethodRestriction(t *testing.T) {
+	containerID := "abcdef1234560000abcdef1234560000abcdef1234560000abcdef12345600ab"
+	podman := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if strings.Contains(r.URL.Path, "/containers/create") {
+			w.WriteHeader(http.StatusCreated)
+			json.NewEncoder(w).Encode(map[string]string{"Id": containerID})
+			return
+		}
+		w.WriteHeader(http.StatusOK)
+		w.Write([]byte("{}"))
+	})
+
+	podmanSock, cleanup1 := mockPodman(t, podman)
+	defer cleanup1()
+
+	proxySock, cleanup2 := startProxy(t, podmanSock, defaultPolicy())
+	defer cleanup2()
+
+	client := unixClient(proxySock)
+
+	// Create container.
+	resp, _ := client.Post(
+		"http://localhost/v4.0.0/containers/create",
+		"application/json",
+		strings.NewReader(`{"Image":"alpine"}`),
+	)
+	resp.Body.Close()
+
+	// GET /containers/<id> (inspect) should be allowed.
+	resp, err := client.Get("http://localhost/v4.0.0/containers/" + containerID)
+	if err != nil {
+		t.Fatalf("inspect: %v", err)
+	}
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("expected 200 for GET (inspect), got %d", resp.StatusCode)
+	}
+
+	// DELETE /containers/<id> should be allowed.
+	req, _ := http.NewRequest(http.MethodDelete, "http://localhost/v4.0.0/containers/"+containerID, nil)
+	resp, err = client.Do(req)
+	if err != nil {
+		t.Fatalf("delete: %v", err)
+	}
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("expected 200 for DELETE, got %d", resp.StatusCode)
+	}
+}
+
+func TestEmptyActionBlocksPost(t *testing.T) {
+	containerID := "abcdef1234560000abcdef1234560000abcdef1234560000abcdef12345600ab"
+	podman := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if strings.Contains(r.URL.Path, "/containers/create") {
+			w.WriteHeader(http.StatusCreated)
+			json.NewEncoder(w).Encode(map[string]string{"Id": containerID})
+			return
+		}
+		t.Fatalf("unexpected request reached podman: %s %s", r.Method, r.URL.Path)
+	})
+
+	podmanSock, cleanup1 := mockPodman(t, podman)
+	defer cleanup1()
+
+	proxySock, cleanup2 := startProxy(t, podmanSock, defaultPolicy())
+	defer cleanup2()
+
+	client := unixClient(proxySock)
+
+	resp, _ := client.Post(
+		"http://localhost/v4.0.0/containers/create",
+		"application/json",
+		strings.NewReader(`{"Image":"alpine"}`),
+	)
+	resp.Body.Close()
+
+	// POST /containers/<id> (no action) should be blocked.
+	resp, err := client.Post("http://localhost/v4.0.0/containers/"+containerID, "", nil)
+	if err != nil {
+		t.Fatalf("request: %v", err)
+	}
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusMethodNotAllowed {
+		t.Fatalf("expected 405 for POST with no action, got %d", resp.StatusCode)
+	}
+
+	// PUT /containers/<id> should also be blocked.
+	req, _ := http.NewRequest(http.MethodPut, "http://localhost/v4.0.0/containers/"+containerID, nil)
+	resp, err = client.Do(req)
+	if err != nil {
+		t.Fatalf("put: %v", err)
+	}
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusMethodNotAllowed {
+		t.Fatalf("expected 405 for PUT with no action, got %d", resp.StatusCode)
+	}
+}
+
+func TestListStripsSizeParam(t *testing.T) {
+	var receivedQuery string
+	podman := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if strings.Contains(r.URL.Path, "/containers/json") {
+			receivedQuery = r.URL.RawQuery
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusOK)
+			w.Write([]byte("[]"))
+			return
+		}
+		w.WriteHeader(http.StatusOK)
+	})
+
+	podmanSock, cleanup1 := mockPodman(t, podman)
+	defer cleanup1()
+
+	proxySock, cleanup2 := startProxy(t, podmanSock, defaultPolicy())
+	defer cleanup2()
+
+	client := unixClient(proxySock)
+	resp, err := client.Get("http://localhost/v4.0.0/containers/json?all=1&size=1")
+	if err != nil {
+		t.Fatalf("list: %v", err)
+	}
+	resp.Body.Close()
+
+	if strings.Contains(receivedQuery, "size") {
+		t.Fatalf("size param should be stripped, but podman received query: %s", receivedQuery)
+	}
+	if !strings.Contains(receivedQuery, "all=1") {
+		t.Fatalf("non-size params should be preserved, but podman received query: %s", receivedQuery)
+	}
+}
+
+func TestStreamingSemaphore(t *testing.T) {
+	containerID := "abcdef1234560000abcdef1234560000abcdef1234560000abcdef12345600ab"
+
+	// Use a channel to hold the log stream open until we release it.
+	holdOpen := make(chan struct{})
+	podman := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if strings.Contains(r.URL.Path, "/containers/create") {
+			w.WriteHeader(http.StatusCreated)
+			json.NewEncoder(w).Encode(map[string]string{"Id": containerID})
+			return
+		}
+		if strings.Contains(r.URL.Path, "/logs") {
+			w.Header().Set("Content-Type", "application/octet-stream")
+			w.WriteHeader(http.StatusOK)
+			w.(http.Flusher).Flush()
+			<-holdOpen // block until released
+			return
+		}
+		w.WriteHeader(http.StatusOK)
+	})
+
+	podmanSock, cleanup1 := mockPodman(t, podman)
+	defer cleanup1()
+
+	// Create proxy with a tiny semaphore (capacity 1).
+	sockPath := testSockPath(t, "x")
+	proxy := &Proxy{
+		PodmanSocket: podmanSock,
+		Policy:       defaultPolicy(),
+		Ownership:    NewOwnership(),
+		AgentID:      "test",
+		streamSem:    make(chan struct{}, 1),
+	}
+	listener, err := net.Listen("unix", sockPath)
+	if err != nil {
+		t.Fatalf("listen: %v", err)
+	}
+	server := &http.Server{Handler: proxy}
+	go server.Serve(listener)
+	defer func() {
+		close(holdOpen)
+		server.Close()
+		listener.Close()
+	}()
+
+	client := unixClient(sockPath)
+
+	// Create container.
+	resp, _ := client.Post(
+		"http://localhost/v4.0.0/containers/create",
+		"application/json",
+		strings.NewReader(`{"Image":"alpine"}`),
+	)
+	resp.Body.Close()
+
+	// First streaming connection — should succeed (fills the semaphore).
+	done := make(chan int, 1)
+	go func() {
+		resp, err := client.Get("http://localhost/v4.0.0/containers/" + containerID + "/logs?stdout=true")
+		if err != nil {
+			done <- 0
+			return
+		}
+		done <- resp.StatusCode
+		resp.Body.Close()
+	}()
+
+	// Give the first stream time to acquire the semaphore.
+	// Use a second client to avoid connection reuse issues.
+	client2 := unixClient(sockPath)
+	var secondStatus int
+	for i := 0; i < 50; i++ {
+		resp, err = client2.Get("http://localhost/v4.0.0/containers/" + containerID + "/logs?stdout=true")
+		if err != nil {
+			t.Fatalf("second stream request: %v", err)
+		}
+		secondStatus = resp.StatusCode
+		resp.Body.Close()
+		if secondStatus == http.StatusServiceUnavailable {
+			break
+		}
+	}
+
+	if secondStatus != http.StatusServiceUnavailable {
+		t.Fatalf("expected 503 when streaming semaphore full, got %d", secondStatus)
+	}
+}
+
+func TestInvalidContainerIDNotRegistered(t *testing.T) {
+	// Podman returns a malformed container ID — should not be registered.
+	podman := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if strings.Contains(r.URL.Path, "/containers/create") {
+			w.WriteHeader(http.StatusCreated)
+			json.NewEncoder(w).Encode(map[string]string{"Id": "NOT-A-VALID-HEX-ID"})
+			return
+		}
+		w.WriteHeader(http.StatusOK)
+	})
+
+	podmanSock, cleanup1 := mockPodman(t, podman)
+	defer cleanup1()
+
+	proxySock, cleanup2 := startProxy(t, podmanSock, defaultPolicy())
+	defer cleanup2()
+
+	client := unixClient(proxySock)
+
+	resp, _ := client.Post(
+		"http://localhost/v4.0.0/containers/create",
+		"application/json",
+		strings.NewReader(`{"Image":"alpine"}`),
+	)
+	resp.Body.Close()
+
+	// The invalid ID should not be in the ownership table.
+	resp, err := client.Get("http://localhost/v4.0.0/containers/json")
+	if err != nil {
+		t.Fatalf("list: %v", err)
+	}
+	resp.Body.Close()
+	// No containers should be listed since the ID was rejected.
 }
 
 func init() {

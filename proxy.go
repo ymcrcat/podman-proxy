@@ -11,16 +11,16 @@ import (
 	"net/http"
 	"net/url"
 	"regexp"
-	"strings"
 	"sync"
 	"time"
 )
 
 const (
-	maxRequestBody  = 10 * 1024 * 1024  // 10 MB
-	maxResponseBody = 128 * 1024 * 1024 // 128 MB
-	clientTimeout   = 60 * time.Second
-	dialTimeout     = 5 * time.Second
+	maxRequestBody      = 10 * 1024 * 1024  // 10 MB
+	maxResponseBody     = 128 * 1024 * 1024 // 128 MB
+	clientTimeout       = 60 * time.Second
+	dialTimeout         = 5 * time.Second
+	maxConcurrentStream = 20 // max simultaneous streaming connections (logs, stats)
 )
 
 // Route patterns for container operations.
@@ -30,6 +30,7 @@ var (
 	containerOpRe     = regexp.MustCompile(`^(/v[\d.]+)?/containers/([^/]+)(/([^/]+))?$`)
 	pingRe            = regexp.MustCompile(`^(/v[\d.]+)?/_ping$`)
 	versionRe         = regexp.MustCompile(`^(/v[\d.]+)?/version$`)
+	containerIDRe     = regexp.MustCompile(`^[0-9a-f]{64}$`)
 )
 
 // allowedContainerActions is the whitelist of per-container sub-operations.
@@ -78,6 +79,7 @@ type Proxy struct {
 	AgentID      string
 	transportMu  sync.Once
 	transport    *http.Transport
+	streamSem    chan struct{} // limits concurrent streaming connections; nil = no limit
 }
 
 func (p *Proxy) getTransport() *http.Transport {
@@ -118,6 +120,7 @@ func (p *Proxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 
 	// Per-container operations.
 	if m := containerOpRe.FindStringSubmatch(path); m != nil {
+		versionPrefix := m[1] // e.g. "/v4.0.0" or ""
 		containerRef := m[2]
 		action := m[4] // empty string if no sub-action
 
@@ -127,7 +130,7 @@ func (p *Proxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 
-		p.handleContainerOp(w, r, containerRef, action)
+		p.handleContainerOp(w, r, versionPrefix, containerRef, action)
 		return
 	}
 
@@ -165,13 +168,14 @@ func (p *Proxy) handleCreate(w http.ResponseWriter, r *http.Request) {
 			Id string `json:"Id"`
 		}
 		if json.Unmarshal(respBody, &createResp) == nil && createResp.Id != "" {
-			name := r.URL.Query().Get("name")
-			p.Ownership.Add(createResp.Id, name)
-			short := createResp.Id
-			if len(short) > 12 {
-				short = short[:12]
+			if !containerIDRe.MatchString(createResp.Id) {
+				log.Printf("[%s] WARNING: ignoring invalid container ID format from podman: %.24s...", p.AgentID, createResp.Id)
+			} else {
+				name := r.URL.Query().Get("name")
+				p.Ownership.Add(createResp.Id, name)
+				short := createResp.Id[:12]
+				log.Printf("[%s] CREATED container %s", p.AgentID, short)
 			}
-			log.Printf("[%s] CREATED container %s", p.AgentID, short)
 		}
 	}
 
@@ -179,7 +183,16 @@ func (p *Proxy) handleCreate(w http.ResponseWriter, r *http.Request) {
 }
 
 func (p *Proxy) handleList(w http.ResponseWriter, r *http.Request) {
-	resp, respBody, err := p.doForward(r, nil)
+	// Strip expensive query parameters to prevent DoS via Podman-side computation.
+	// "size=1" forces Podman to calculate disk usage for every container.
+	listReq := *r
+	listURL := *r.URL
+	q := listURL.Query()
+	q.Del("size")
+	listURL.RawQuery = q.Encode()
+	listReq.URL = &listURL
+
+	resp, respBody, err := p.doForward(&listReq, nil)
 	if err != nil {
 		http.Error(w, fmt.Sprintf("upstream error: %v", err), http.StatusBadGateway)
 		return
@@ -217,11 +230,20 @@ func (p *Proxy) handleList(w http.ResponseWriter, r *http.Request) {
 	writeFilteredResponse(w, resp, result, "application/json")
 }
 
-func (p *Proxy) handleContainerOp(w http.ResponseWriter, r *http.Request, containerRef, action string) {
+func (p *Proxy) handleContainerOp(w http.ResponseWriter, r *http.Request, versionPrefix, containerRef, action string) {
 	// Check action is in the whitelist.
 	if !allowedContainerActions[action] {
 		log.Printf("[%s] BLOCKED action %q on container %s", p.AgentID, action, containerRef)
 		http.Error(w, fmt.Sprintf("forbidden: action %q not allowed", action), http.StatusForbidden)
+		return
+	}
+
+	// For no-action paths, only allow GET (inspect) and DELETE (remove).
+	// Blocks PUT/POST/PATCH to bare /containers/<id> which could hit
+	// undocumented Podman endpoints.
+	if action == "" && r.Method != http.MethodGet && r.Method != http.MethodDelete {
+		log.Printf("[%s] BLOCKED %s on container %s (method not allowed)", p.AgentID, r.Method, containerRef)
+		http.Error(w, "forbidden: method not allowed", http.StatusMethodNotAllowed)
 		return
 	}
 
@@ -235,9 +257,15 @@ func (p *Proxy) handleContainerOp(w http.ResponseWriter, r *http.Request, contai
 		return
 	}
 
-	// Rewrite the request URL to use the canonical full ID.
+	// Build rewritten path structurally from regex captures — never use
+	// string replacement, which can replace the wrong segment if the
+	// container name matches part of the version prefix or action.
+	newPath := versionPrefix + "/containers/" + url.PathEscape(fullID)
+	if action != "" {
+		newPath += "/" + action
+	}
 	rewrittenURL := *r.URL
-	rewrittenURL.Path = strings.Replace(r.URL.Path, "/"+containerRef, "/"+url.PathEscape(fullID), 1)
+	rewrittenURL.Path = newPath
 	rewrittenURL.RawPath = "" // force use of Path
 	rewritten := *r
 	rewritten.URL = &rewrittenURL
@@ -314,7 +342,9 @@ func (p *Proxy) doForward(r *http.Request, overrideBody []byte) (*http.Response,
 		return nil, nil, fmt.Errorf("creating forward request: %w", err)
 	}
 
-	for _, h := range []string{"Content-Type", "Accept", "X-Registry-Auth"} {
+	// Only forward safe headers — X-Registry-Auth is intentionally excluded
+	// to prevent tenants from supplying credentials for private registries.
+	for _, h := range []string{"Content-Type", "Accept"} {
 		if v := r.Header.Get(h); v != "" {
 			req.Header.Set(h, v)
 		}
@@ -340,6 +370,17 @@ func (p *Proxy) doForward(r *http.Request, overrideBody []byte) (*http.Response,
 // streamForward pipes the upstream response directly to the client without buffering.
 // Used for streaming endpoints (logs, stats) that produce unbounded output.
 func (p *Proxy) streamForward(w http.ResponseWriter, r *http.Request) {
+	// Limit concurrent streaming connections to prevent goroutine/socket exhaustion.
+	if p.streamSem != nil {
+		select {
+		case p.streamSem <- struct{}{}:
+			defer func() { <-p.streamSem }()
+		default:
+			http.Error(w, "too many streaming connections", http.StatusServiceUnavailable)
+			return
+		}
+	}
+
 	client := &http.Client{
 		// No timeout — streaming can run indefinitely until the client disconnects.
 		Transport: p.getTransport(),

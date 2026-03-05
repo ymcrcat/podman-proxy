@@ -15,6 +15,7 @@ type Policy struct {
 	AllowedImages []string // empty = allow all
 	MaxMemory     int64    // bytes, 0 = no limit
 	MaxCPUs       float64  // 0 = no limit
+	MaxPids       int64    // 0 = no limit
 }
 
 // allowedCaps is the allowlist of capabilities that may be added to containers.
@@ -51,6 +52,7 @@ type hostConfig struct {
 	NanoCpus     int64    `json:"NanoCpus,omitempty"`
 	CpuPeriod    int64    `json:"CpuPeriod,omitempty"`
 	CpuQuota     int64    `json:"CpuQuota,omitempty"`
+	PidsLimit    int64    `json:"PidsLimit,omitempty"`
 }
 
 // mountEntry is the subset of a Mounts entry we validate.
@@ -196,6 +198,16 @@ func (p *Policy) ValidateAndSanitize(body []byte) ([]byte, error) {
 				b, _ := json.Marshal(maxQuota)
 				rawHC["CpuQuota"] = b
 			}
+		}
+	}
+
+	// Enforce PidsLimit to prevent fork bomb DoS.
+	// Always set a limit when MaxPids is configured, even if the tenant
+	// didn't request one (PidsLimit=0 or -1 means unlimited in Podman).
+	if p.MaxPids > 0 {
+		if hc.PidsLimit <= 0 || hc.PidsLimit > p.MaxPids {
+			b, _ := json.Marshal(p.MaxPids)
+			rawHC["PidsLimit"] = b
 		}
 	}
 

@@ -21,6 +21,7 @@ func main() {
 	allowedImages := flag.String("allowed-images", "", "Comma-separated image allowlist (empty = allow all)")
 	maxMemory := flag.Int64("max-memory", 2*1024*1024*1024, "Max memory per container in bytes")
 	maxCPUs := flag.Float64("max-cpus", 2.0, "Max CPUs per container")
+	maxPids := flag.Int64("max-pids", 1024, "Max PIDs per container (prevents fork bombs)")
 	agentID := flag.String("agent-id", "agent", "Agent identifier for logging/labeling")
 	flag.Parse()
 
@@ -39,6 +40,7 @@ func main() {
 		AllowedImages: images,
 		MaxMemory:     *maxMemory,
 		MaxCPUs:       *maxCPUs,
+		MaxPids:       *maxPids,
 	}
 
 	proxy := &Proxy{
@@ -46,6 +48,7 @@ func main() {
 		Policy:       policy,
 		Ownership:    NewOwnership(),
 		AgentID:      *agentID,
+		streamSem:    make(chan struct{}, maxConcurrentStream),
 	}
 
 	// Remove stale socket file if it exists.
@@ -94,7 +97,7 @@ func main() {
 	if len(images) > 0 {
 		fmt.Printf("  allowed images: %s\n", strings.Join(images, ", "))
 	}
-	fmt.Printf("  max memory: %d bytes, max cpus: %.1f\n", *maxMemory, *maxCPUs)
+	fmt.Printf("  max memory: %d bytes, max cpus: %.1f, max pids: %d\n", *maxMemory, *maxCPUs, *maxPids)
 
 	if err := server.Serve(listener); err != http.ErrServerClosed {
 		log.Fatalf("Server error: %v", err)
