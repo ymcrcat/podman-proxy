@@ -1,8 +1,8 @@
 # podman-proxy
 
-A thin Go proxy that sits between AI agent containers and the real podman socket, enforcing per-agent security policies and container ownership tracking.
+A thin Go proxy that sits between containers and the real podman socket, enforcing security policies and tracking container ownership.
 
-Agents get a Unix socket that looks like a standard Docker/Podman API endpoint, but the proxy restricts what they can do: no privileged containers, no host filesystem access outside a workspace directory, no dangerous capabilities, and each agent can only see and manage containers it created.
+Each proxy instance exposes a Unix socket that looks like a standard Docker/Podman API endpoint, but restricts what callers can do: no privileged containers, no host filesystem access outside a designated workspace directory, no dangerous capabilities, and each caller can only see and manage containers it created. Run one proxy per tenant to get per-tenant isolation without giving anyone unrestricted access to the podman socket.
 
 ## Build
 
@@ -32,44 +32,44 @@ Start the proxy:
 
 ```bash
 ./podman-proxy \
-  --listen /tmp/agent-1.sock \
+  --listen /tmp/tenant-1.sock \
   --podman-socket /run/user/1000/podman/podman.sock \
-  --workspace /home/user/agent-workspace \
-  --agent-id agent-1
+  --workspace /home/user/workspace \
+  --agent-id tenant-1
 ```
 
 Test it with curl:
 
 ```bash
 # Should work — create a container
-curl --unix-socket /tmp/agent-1.sock -X POST http://localhost/v4.0.0/containers/create \
+curl --unix-socket /tmp/tenant-1.sock -X POST http://localhost/v4.0.0/containers/create \
   -H "Content-Type: application/json" \
   -d '{"Image":"alpine","Cmd":["echo","hello"]}'
 
 # Should be blocked — privileged container
-curl --unix-socket /tmp/agent-1.sock -X POST http://localhost/v4.0.0/containers/create \
+curl --unix-socket /tmp/tenant-1.sock -X POST http://localhost/v4.0.0/containers/create \
   -H "Content-Type: application/json" \
   -d '{"Image":"alpine","HostConfig":{"Privileged":true}}'
 ```
 
-## Using with an agent container
+## Using from inside a container
 
-Mount the proxy socket into the agent container as `/var/run/docker.sock` so standard Docker/Podman clients work without configuration:
+Mount the proxy socket into a container as `/var/run/docker.sock` so standard Docker/Podman clients work without configuration:
 
 ```bash
-# Start a proxy for this agent
+# Start a proxy
 ./podman-proxy \
-  --listen /tmp/agent-1.sock \
+  --listen /tmp/tenant-1.sock \
   --podman-socket /run/user/1000/podman/podman.sock \
   --workspace /tmp/workspace \
-  --agent-id agent-1 &
+  --agent-id tenant-1 &
 
-# Run the agent container with the proxy socket mounted
+# Run a container with the proxy socket mounted
 podman run --rm -it \
-  -v /tmp/agent-1.sock:/var/run/docker.sock \
+  -v /tmp/tenant-1.sock:/var/run/docker.sock \
   alpine sh
 
-# Inside the container, the agent can create worker containers:
+# Inside the container, create and manage worker containers:
 apk add curl
 curl --unix-socket /var/run/docker.sock -X POST \
   http://localhost/v4.0.0/containers/create \
