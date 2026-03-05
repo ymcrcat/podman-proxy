@@ -277,6 +277,22 @@ func (p *Policy) ValidateAndSanitize(body []byte) ([]byte, error) {
 	}
 	raw["HostConfig"] = hcBytes
 
+	// --- Top-level field sanitization ---
+
+	// Strip NetworkingConfig — allows joining arbitrary host networks,
+	// bypassing the HostConfig.NetworkMode restriction.
+	delete(raw, "NetworkingConfig")
+
+	// Cap StopTimeout — controls how long Podman waits for SIGTERM before
+	// SIGKILL. Extreme values can delay container cleanup on shutdown.
+	if v, ok := raw["StopTimeout"]; ok && string(v) != "null" {
+		var t int64
+		if json.Unmarshal(v, &t) == nil && (t < 0 || t > 300) {
+			b, _ := json.Marshal(int64(10))
+			raw["StopTimeout"] = b
+		}
+	}
+
 	// Always re-marshal to collapse any duplicate keys.
 	result, err := json.Marshal(raw)
 	if err != nil {

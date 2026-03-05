@@ -3256,6 +3256,144 @@ func TestLogsTailValidation(t *testing.T) {
 	}
 }
 
+// --- Round 14 tests ---
+
+func TestStripNetworkingConfig(t *testing.T) {
+	p := defaultPolicy()
+	body := `{"Image":"alpine","NetworkingConfig":{"EndpointsConfig":{"host":{}}}}`
+	result, err := p.ValidateAndSanitize([]byte(body))
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	var raw map[string]json.RawMessage
+	json.Unmarshal(result, &raw)
+	if _, ok := raw["NetworkingConfig"]; ok {
+		t.Fatal("NetworkingConfig should have been stripped")
+	}
+}
+
+func TestCapStopTimeout(t *testing.T) {
+	p := defaultPolicy()
+	// StopTimeout of 999999 should be capped to 10
+	body := `{"Image":"alpine","StopTimeout":999999}`
+	result, err := p.ValidateAndSanitize([]byte(body))
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	var raw map[string]json.RawMessage
+	json.Unmarshal(result, &raw)
+	var t2 int64
+	json.Unmarshal(raw["StopTimeout"], &t2)
+	if t2 != 10 {
+		t.Fatalf("StopTimeout should be capped to 10, got %d", t2)
+	}
+
+	// StopTimeout of 30 should pass through
+	body = `{"Image":"alpine","StopTimeout":30}`
+	result, err = p.ValidateAndSanitize([]byte(body))
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	json.Unmarshal(result, &raw)
+	json.Unmarshal(raw["StopTimeout"], &t2)
+	if t2 != 30 {
+		t.Fatalf("StopTimeout of 30 should pass through, got %d", t2)
+	}
+}
+
+func TestLogsSinceUntilValidation(t *testing.T) {
+	cid := "5566778899001122334455667788990011223344556677889900112233445566"
+	var capturedQuery string
+	podmanSock, cleanup := mockPodman(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		capturedQuery = r.URL.RawQuery
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer cleanup()
+
+	sockPath := testSockPath(t, "x")
+	proxy := &Proxy{
+		PodmanSocket: podmanSock,
+		Policy:       defaultPolicy(),
+		Ownership:    NewOwnership(),
+		AgentID:      "test",
+		streamSem:    make(chan struct{}, maxConcurrentStream),
+	}
+	listener, err := net.Listen("unix", sockPath)
+	if err != nil {
+		t.Fatalf("listen: %v", err)
+	}
+	server := &http.Server{Handler: proxy}
+	go server.Serve(listener)
+	defer func() { server.Close(); listener.Close() }()
+	proxy.Ownership.Add(cid, "")
+	client := unixClient(sockPath)
+
+	// Valid since timestamp should pass
+	resp, err := client.Get(
+		"http://localhost/v4.0.0/containers/" + cid + "/logs?stdout=true&since=1700000000",
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	resp.Body.Close()
+	if !strings.Contains(capturedQuery, "since=1700000000") {
+		t.Fatalf("valid since should pass, got %q", capturedQuery)
+	}
+
+	// Malformed since should be stripped
+	resp, err = client.Get(
+		"http://localhost/v4.0.0/containers/" + cid + "/logs?stdout=true&since=../../../../etc/passwd",
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	resp.Body.Close()
+	if strings.Contains(capturedQuery, "since") {
+		t.Fatalf("malformed since should be stripped, got %q", capturedQuery)
+	}
+}
+
+func TestActionBodyDiscarded(t *testing.T) {
+	cid := "6677889900112233445566778899001122334455667788990011223344556677"
+	var capturedBody []byte
+	podmanSock, cleanup := mockPodman(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		capturedBody, _ = io.ReadAll(r.Body)
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer cleanup()
+
+	sockPath := testSockPath(t, "x")
+	proxy := &Proxy{
+		PodmanSocket: podmanSock,
+		Policy:       defaultPolicy(),
+		Ownership:    NewOwnership(),
+		AgentID:      "test",
+	}
+	listener, err := net.Listen("unix", sockPath)
+	if err != nil {
+		t.Fatalf("listen: %v", err)
+	}
+	server := &http.Server{Handler: proxy}
+	go server.Serve(listener)
+	defer func() { server.Close(); listener.Close() }()
+	proxy.Ownership.Add(cid, "")
+	client := unixClient(sockPath)
+
+	// Send a body with the kill action — it should be discarded
+	resp, err := client.Post(
+		"http://localhost/v4.0.0/containers/"+cid+"/kill?signal=SIGTERM",
+		"application/json",
+		strings.NewReader(`{"Signal":"SIGSEGV"}`),
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	resp.Body.Close()
+	if len(capturedBody) > 0 {
+		t.Fatalf("body should have been discarded, got %q", string(capturedBody))
+	}
+}
+
 func init() {
 	_ = os.Stderr
 }

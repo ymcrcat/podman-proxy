@@ -1,6 +1,6 @@
 # Security Issues Found
 
-83 issues found and fixed across 13 rounds of security review. All issues were found through automated code review and fixed with corresponding tests.
+88 issues found and fixed across 14 rounds of security review. All issues were found through automated code review and fixed with corresponding tests.
 
 ## Round 1 — 22 issues (foundational hardening)
 
@@ -169,7 +169,17 @@ Established the core security model.
 | Input validation | 8 | 5, 6, 7, 11, 12, 13 |
 | Policy bypass | 1 | 13 |
 
-**Totals: 24 CRITICAL, 50 IMPORTANT, 9 LOW.**
+## Round 14 — 5 issues
+
+| # | Category | Issue | Severity |
+|---|----------|-------|----------|
+| 1 | Policy bypass | `StopTimeout` top-level field unvalidated — can delay container cleanup indefinitely | IMPORTANT |
+| 2 | Networking | `NetworkingConfig` top-level field bypasses `NetworkMode` restriction — can join arbitrary host networks | IMPORTANT |
+| 3 | Input validation | `logs` `since`/`until` params forwarded unvalidated to Podman's filter parser | IMPORTANT |
+| 4 | DoS | `WriteTimeout: 120s` silently overrides 10-min `streamCtx` — fixed to 11 minutes | IMPORTANT |
+| 5 | Policy bypass | Non-create action endpoints forward request body verbatim — body-based signal/param bypass | IMPORTANT |
+
+**Totals: 24 CRITICAL, 55 IMPORTANT, 9 LOW.**
 
 ## Recurring patterns
 

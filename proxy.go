@@ -399,6 +399,15 @@ func (p *Proxy) handleContainerOp(w http.ResponseWriter, r *http.Request, versio
 				sanitizedQuery.Del("tail")
 			}
 		}
+		// Validate since/until as Unix timestamps in a reasonable range.
+		for _, param := range []string{"since", "until"} {
+			if v := sanitizedQuery.Get(param); v != "" {
+				n, err := strconv.ParseInt(v, 10, 64)
+				if err != nil || n < 0 || n > 9999999999 {
+					sanitizedQuery.Del(param)
+				}
+			}
+		}
 	}
 
 	// Build rewritten path structurally from regex captures — never use
@@ -426,8 +435,10 @@ func (p *Proxy) handleContainerOp(w http.ResponseWriter, r *http.Request, versio
 		return
 	}
 
-	// Forward and capture response to check status before untracking.
-	resp, respBody, err := p.doForward(&rewritten, nil)
+	// Forward with empty body — non-create actions should not have meaningful
+	// request bodies, and forwarding them could bypass query param validation
+	// (e.g. kill signal in body instead of query param).
+	resp, respBody, err := p.doForward(&rewritten, []byte{})
 	if err != nil {
 		http.Error(w, fmt.Sprintf("upstream error: %v", err), http.StatusBadGateway)
 		return

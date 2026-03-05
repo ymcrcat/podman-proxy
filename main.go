@@ -66,7 +66,7 @@ func main() {
 		Handler:           proxy,
 		ReadHeaderTimeout: 10 * time.Second,
 		ReadTimeout:       30 * time.Second,
-		WriteTimeout:      120 * time.Second,
+		WriteTimeout:      11 * time.Minute, // slightly longer than 10-min streaming context timeout
 		IdleTimeout:       60 * time.Second,
 	}
 
