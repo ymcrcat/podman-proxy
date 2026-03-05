@@ -992,6 +992,215 @@ func TestProxyTracksContainerName(t *testing.T) {
 	}
 }
 
+func TestProxyRewritesContainerRefToFullID(t *testing.T) {
+	containerID := "abc123def456789012345678"
+	var receivedPath string
+	podman := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if strings.Contains(r.URL.Path, "/containers/create") {
+			w.WriteHeader(http.StatusCreated)
+			json.NewEncoder(w).Encode(map[string]string{"Id": containerID})
+			return
+		}
+		receivedPath = r.URL.Path
+		w.WriteHeader(http.StatusOK)
+		w.Write([]byte("{}"))
+	})
+
+	podmanSock, cleanup1 := mockPodman(t, podman)
+	defer cleanup1()
+
+	proxySock, cleanup2 := startProxy(t, podmanSock, defaultPolicy())
+	defer cleanup2()
+
+	client := unixClient(proxySock)
+
+	// Create container.
+	resp, _ := client.Post(
+		"http://localhost/v4.0.0/containers/create?name=my-worker",
+		"application/json",
+		strings.NewReader(`{"Image":"alpine"}`),
+	)
+	resp.Body.Close()
+
+	// Access by name — podman should receive the full ID, not the name.
+	resp, err := client.Post("http://localhost/v4.0.0/containers/my-worker/start", "", nil)
+	if err != nil {
+		t.Fatalf("start: %v", err)
+	}
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("expected 200, got %d", resp.StatusCode)
+	}
+	if !strings.Contains(receivedPath, containerID) {
+		t.Fatalf("expected podman to receive full ID in path, got %s", receivedPath)
+	}
+
+	// Access by 12-char prefix — podman should also receive the full ID.
+	resp, err = client.Post("http://localhost/v4.0.0/containers/abc123def456/start", "", nil)
+	if err != nil {
+		t.Fatalf("start by prefix: %v", err)
+	}
+	resp.Body.Close()
+	if !strings.Contains(receivedPath, containerID) {
+		t.Fatalf("expected podman to receive full ID for prefix, got %s", receivedPath)
+	}
+}
+
+func TestProxyRenameUpdatesOwnership(t *testing.T) {
+	containerID := "abc123def456789012345678"
+	podman := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if strings.Contains(r.URL.Path, "/containers/create") {
+			w.WriteHeader(http.StatusCreated)
+			json.NewEncoder(w).Encode(map[string]string{"Id": containerID})
+			return
+		}
+		w.WriteHeader(http.StatusOK)
+		w.Write([]byte("{}"))
+	})
+
+	podmanSock, cleanup1 := mockPodman(t, podman)
+	defer cleanup1()
+
+	proxySock, cleanup2 := startProxy(t, podmanSock, defaultPolicy())
+	defer cleanup2()
+
+	client := unixClient(proxySock)
+
+	// Create with name.
+	resp, _ := client.Post(
+		"http://localhost/v4.0.0/containers/create?name=old-name",
+		"application/json",
+		strings.NewReader(`{"Image":"alpine"}`),
+	)
+	resp.Body.Close()
+
+	// Rename.
+	resp, err := client.Post("http://localhost/v4.0.0/containers/"+containerID+"/rename?name=new-name", "", nil)
+	if err != nil {
+		t.Fatalf("rename: %v", err)
+	}
+	resp.Body.Close()
+
+	// Access by new name should work.
+	resp, err = client.Post("http://localhost/v4.0.0/containers/new-name/start", "", nil)
+	if err != nil {
+		t.Fatalf("start by new name: %v", err)
+	}
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("expected 200 for new name, got %d", resp.StatusCode)
+	}
+
+	// Access by old name should fail.
+	resp, err = client.Post("http://localhost/v4.0.0/containers/old-name/start", "", nil)
+	if err != nil {
+		t.Fatalf("start by old name: %v", err)
+	}
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusForbidden {
+		t.Fatalf("expected 403 for old name after rename, got %d", resp.StatusCode)
+	}
+}
+
+func TestOwnershipRename(t *testing.T) {
+	o := NewOwnership()
+	o.Add("abc123def456abcdef", "old-name")
+	o.Rename("abc123def456abcdef", "new-name")
+
+	if o.Owns("old-name") {
+		t.Fatal("old name should not match after rename")
+	}
+	if !o.Owns("new-name") {
+		t.Fatal("new name should match after rename")
+	}
+	if !o.Owns("abc123def456abcdef") {
+		t.Fatal("ID should still match after rename")
+	}
+}
+
+func TestProxyListDoesNotLeakHeaders(t *testing.T) {
+	podman := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if strings.Contains(r.URL.Path, "/containers/json") {
+			w.Header().Set("Server", "libpod/secret-version")
+			w.Header().Set("X-Custom-Internal", "leak-me")
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusOK)
+			w.Write([]byte("[]"))
+			return
+		}
+		w.WriteHeader(http.StatusOK)
+	})
+
+	podmanSock, cleanup1 := mockPodman(t, podman)
+	defer cleanup1()
+
+	proxySock, cleanup2 := startProxy(t, podmanSock, defaultPolicy())
+	defer cleanup2()
+
+	client := unixClient(proxySock)
+	resp, err := client.Get("http://localhost/v4.0.0/containers/json")
+	if err != nil {
+		t.Fatalf("list: %v", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.Header.Get("Server") != "" {
+		t.Fatalf("Server header should be stripped, got %q", resp.Header.Get("Server"))
+	}
+	if resp.Header.Get("X-Custom-Internal") != "" {
+		t.Fatalf("X-Custom-Internal header should be stripped, got %q", resp.Header.Get("X-Custom-Internal"))
+	}
+}
+
+func TestProxyStreamingLogs(t *testing.T) {
+	containerID := "abc123def456789012345678"
+	logOutput := "line1\nline2\nline3\n"
+	podman := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if strings.Contains(r.URL.Path, "/containers/create") {
+			w.WriteHeader(http.StatusCreated)
+			json.NewEncoder(w).Encode(map[string]string{"Id": containerID})
+			return
+		}
+		if strings.Contains(r.URL.Path, "/logs") {
+			w.Header().Set("Content-Type", "application/octet-stream")
+			w.WriteHeader(http.StatusOK)
+			w.Write([]byte(logOutput))
+			return
+		}
+		w.WriteHeader(http.StatusOK)
+	})
+
+	podmanSock, cleanup1 := mockPodman(t, podman)
+	defer cleanup1()
+
+	proxySock, cleanup2 := startProxy(t, podmanSock, defaultPolicy())
+	defer cleanup2()
+
+	client := unixClient(proxySock)
+
+	// Create container.
+	resp, _ := client.Post(
+		"http://localhost/v4.0.0/containers/create",
+		"application/json",
+		strings.NewReader(`{"Image":"alpine"}`),
+	)
+	resp.Body.Close()
+
+	// Get logs — should be streamed, not buffered.
+	resp, err := client.Get("http://localhost/v4.0.0/containers/" + containerID + "/logs?stdout=true")
+	if err != nil {
+		t.Fatalf("logs: %v", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("expected 200, got %d", resp.StatusCode)
+	}
+	body, _ := io.ReadAll(resp.Body)
+	if string(body) != logOutput {
+		t.Fatalf("expected log output %q, got %q", logOutput, string(body))
+	}
+}
+
 func init() {
 	_ = os.Stderr
 }

@@ -362,6 +362,23 @@ func (o *Ownership) Add(id, name string) {
 	}
 }
 
+// Rename updates the name associated with a container ID.
+// Removes the old name mapping and sets the new one.
+func (o *Ownership) Rename(id, newName string) {
+	o.mu.Lock()
+	defer o.mu.Unlock()
+	// Remove old name mapping.
+	if oldName, ok := o.idToName[id]; ok {
+		delete(o.names, oldName)
+		delete(o.idToName, id)
+	}
+	// Set new name if provided.
+	if newName != "" {
+		o.names[newName] = id
+		o.idToName[id] = newName
+	}
+}
+
 // Remove unregisters a container ID and its associated name.
 func (o *Ownership) Remove(id string) {
 	o.mu.Lock()

@@ -11,6 +11,8 @@ import (
 	"net/http"
 	"net/url"
 	"regexp"
+	"strings"
+	"sync"
 	"time"
 )
 
@@ -61,17 +63,25 @@ var allowedResponseHeaders = map[string]bool{
 	"Transfer-Encoding":     true,
 }
 
+// streamingActions are container actions that produce unbounded streaming output.
+// These are piped directly to the client instead of being buffered in memory.
+var streamingActions = map[string]bool{
+	"logs":  true,
+	"stats": true,
+}
+
 // Proxy is the HTTP handler that enforces policy and forwards to podman.
 type Proxy struct {
 	PodmanSocket string
 	Policy       *Policy
 	Ownership    *Ownership
 	AgentID      string
+	transportMu  sync.Once
 	transport    *http.Transport
 }
 
 func (p *Proxy) getTransport() *http.Transport {
-	if p.transport == nil {
+	p.transportMu.Do(func() {
 		p.transport = &http.Transport{
 			DialContext: func(ctx context.Context, _, _ string) (net.Conn, error) {
 				d := net.Dialer{Timeout: dialTimeout}
@@ -81,7 +91,7 @@ func (p *Proxy) getTransport() *http.Transport {
 			IdleConnTimeout:     90 * time.Second,
 			MaxIdleConnsPerHost: 10,
 		}
-	}
+	})
 	return p.transport
 }
 
@@ -204,15 +214,7 @@ func (p *Proxy) handleList(w http.ResponseWriter, r *http.Request) {
 	}
 
 	result, _ := json.Marshal(filtered)
-	for k, vv := range resp.Header {
-		for _, v := range vv {
-			w.Header().Add(k, v)
-		}
-	}
-	w.Header().Set("Content-Type", "application/json")
-	w.Header().Del("Content-Length")
-	w.WriteHeader(http.StatusOK)
-	w.Write(result)
+	writeFilteredResponse(w, resp, result, "application/json")
 }
 
 func (p *Proxy) handleContainerOp(w http.ResponseWriter, r *http.Request, containerRef, action string) {
@@ -223,19 +225,36 @@ func (p *Proxy) handleContainerOp(w http.ResponseWriter, r *http.Request, contai
 		return
 	}
 
-	// Check ownership.
-	if !p.Ownership.Owns(containerRef) {
+	// Resolve to canonical full ID. This ensures the proxy checks ownership
+	// and forwards to podman using the exact same container identity,
+	// preventing cross-tenant access via name=ID-prefix injection.
+	fullID := p.Ownership.FullID(containerRef)
+	if fullID == "" {
 		log.Printf("[%s] BLOCKED access to unowned container %s", p.AgentID, containerRef)
 		http.Error(w, "forbidden: container not owned by this agent", http.StatusForbidden)
 		return
 	}
 
+	// Rewrite the request URL to use the canonical full ID.
+	rewrittenURL := *r.URL
+	rewrittenURL.Path = strings.Replace(r.URL.Path, "/"+containerRef, "/"+url.PathEscape(fullID), 1)
+	rewrittenURL.RawPath = "" // force use of Path
+	rewritten := *r
+	rewritten.URL = &rewrittenURL
+
 	// Determine if this is a remove operation.
 	isRemove := r.Method == http.MethodDelete ||
 		(r.Method == http.MethodPost && action == "remove")
 
+	// Streaming endpoints (logs, stats) are piped directly to avoid
+	// buffering unbounded output in memory.
+	if streamingActions[action] {
+		p.streamForward(w, &rewritten)
+		return
+	}
+
 	// Forward and capture response to check status before untracking.
-	resp, respBody, err := p.doForward(r, nil)
+	resp, respBody, err := p.doForward(&rewritten, nil)
 	if err != nil {
 		http.Error(w, fmt.Sprintf("upstream error: %v", err), http.StatusBadGateway)
 		return
@@ -245,15 +264,18 @@ func (p *Proxy) handleContainerOp(w http.ResponseWriter, r *http.Request, contai
 
 	// Only untrack on successful remove (2xx).
 	if isRemove && resp.StatusCode >= 200 && resp.StatusCode < 300 {
-		fullID := p.Ownership.FullID(containerRef)
-		if fullID != "" {
-			p.Ownership.Remove(fullID)
-			short := fullID
-			if len(short) > 12 {
-				short = short[:12]
-			}
-			log.Printf("[%s] REMOVED container %s", p.AgentID, short)
+		p.Ownership.Remove(fullID)
+		short := fullID
+		if len(short) > 12 {
+			short = short[:12]
 		}
+		log.Printf("[%s] REMOVED container %s", p.AgentID, short)
+	}
+
+	// Update ownership table after successful rename.
+	if action == "rename" && resp.StatusCode >= 200 && resp.StatusCode < 300 {
+		newName := r.URL.Query().Get("name")
+		p.Ownership.Rename(fullID, newName)
 	}
 }
 
@@ -315,9 +337,67 @@ func (p *Proxy) doForward(r *http.Request, overrideBody []byte) (*http.Response,
 	return resp, respBody, nil
 }
 
-// writeResponse copies an upstream response back to the client.
-// Only allowlisted headers are forwarded to avoid leaking infrastructure details.
-func writeResponse(w http.ResponseWriter, resp *http.Response, body []byte) {
+// streamForward pipes the upstream response directly to the client without buffering.
+// Used for streaming endpoints (logs, stats) that produce unbounded output.
+func (p *Proxy) streamForward(w http.ResponseWriter, r *http.Request) {
+	client := &http.Client{
+		// No timeout — streaming can run indefinitely until the client disconnects.
+		Transport: p.getTransport(),
+	}
+
+	var bodyReader io.Reader
+	if r.Body != nil {
+		bodyData, err := io.ReadAll(io.LimitReader(r.Body, maxRequestBody))
+		r.Body.Close()
+		if err != nil {
+			http.Error(w, "failed to read request body", http.StatusBadRequest)
+			return
+		}
+		bodyReader = bytes.NewReader(bodyData)
+	}
+
+	reqURL := "http://podman" + r.URL.RequestURI()
+	req, err := http.NewRequestWithContext(r.Context(), r.Method, reqURL, bodyReader)
+	if err != nil {
+		http.Error(w, fmt.Sprintf("upstream error: %v", err), http.StatusBadGateway)
+		return
+	}
+
+	for _, h := range []string{"Content-Type", "Accept"} {
+		if v := r.Header.Get(h); v != "" {
+			req.Header.Set(h, v)
+		}
+	}
+
+	resp, err := client.Do(req)
+	if err != nil {
+		http.Error(w, fmt.Sprintf("upstream error: %v", err), http.StatusBadGateway)
+		return
+	}
+	defer resp.Body.Close()
+
+	copyFilteredHeaders(w, resp)
+	w.WriteHeader(resp.StatusCode)
+
+	// Flush-aware copy for streaming.
+	flusher, canFlush := w.(http.Flusher)
+	buf := make([]byte, 32*1024)
+	for {
+		n, readErr := resp.Body.Read(buf)
+		if n > 0 {
+			w.Write(buf[:n])
+			if canFlush {
+				flusher.Flush()
+			}
+		}
+		if readErr != nil {
+			break
+		}
+	}
+}
+
+// copyFilteredHeaders writes only allowlisted upstream headers to the response.
+func copyFilteredHeaders(w http.ResponseWriter, resp *http.Response) {
 	for k, vv := range resp.Header {
 		if !allowedResponseHeaders[http.CanonicalHeaderKey(k)] {
 			continue
@@ -327,7 +407,21 @@ func writeResponse(w http.ResponseWriter, resp *http.Response, body []byte) {
 		}
 	}
 	w.Header().Del("Content-Length")
+}
+
+// writeResponse copies an upstream response back to the client.
+// Only allowlisted headers are forwarded to avoid leaking infrastructure details.
+func writeResponse(w http.ResponseWriter, resp *http.Response, body []byte) {
+	copyFilteredHeaders(w, resp)
 	w.WriteHeader(resp.StatusCode)
+	w.Write(body)
+}
+
+// writeFilteredResponse writes a response with allowlisted headers and an overridden content type.
+func writeFilteredResponse(w http.ResponseWriter, resp *http.Response, body []byte, contentType string) {
+	copyFilteredHeaders(w, resp)
+	w.Header().Set("Content-Type", contentType)
+	w.WriteHeader(http.StatusOK)
 	w.Write(body)
 }
 
