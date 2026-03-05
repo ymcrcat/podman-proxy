@@ -229,9 +229,9 @@ func TestImageAllowlist(t *testing.T) {
 	}
 }
 
-func TestStripDangerousCaps(t *testing.T) {
+func TestStripNonAllowlistedCaps(t *testing.T) {
 	p := defaultPolicy()
-	body := `{"Image":"alpine","HostConfig":{"CapAdd":["NET_BIND_SERVICE","SYS_ADMIN","NET_RAW"]}}`
+	body := `{"Image":"alpine","HostConfig":{"CapAdd":["NET_BIND_SERVICE","SYS_ADMIN","SYS_MODULE"]}}`
 	result, err := p.ValidateAndSanitize([]byte(body))
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
@@ -244,6 +244,24 @@ func TestStripDangerousCaps(t *testing.T) {
 	json.Unmarshal(rawHC["CapAdd"], &caps)
 	if len(caps) != 1 || caps[0] != "NET_BIND_SERVICE" {
 		t.Fatalf("expected only NET_BIND_SERVICE, got %v", caps)
+	}
+}
+
+func TestStripCapAddAll(t *testing.T) {
+	p := defaultPolicy()
+	body := `{"Image":"alpine","HostConfig":{"CapAdd":["ALL"]}}`
+	result, err := p.ValidateAndSanitize([]byte(body))
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	var raw map[string]json.RawMessage
+	json.Unmarshal(result, &raw)
+	var rawHC map[string]json.RawMessage
+	json.Unmarshal(raw["HostConfig"], &rawHC)
+	var caps []string
+	json.Unmarshal(rawHC["CapAdd"], &caps)
+	if len(caps) != 0 {
+		t.Fatalf("expected ALL to be stripped, got %v", caps)
 	}
 }
 
@@ -331,6 +349,26 @@ func TestCapNanoCpus(t *testing.T) {
 	}
 }
 
+func TestCapCpuQuotaWithoutPeriod(t *testing.T) {
+	p := &Policy{Workspace: "/workspace", MaxMemory: 2e9, MaxCPUs: 1.0}
+	// CpuQuota without CpuPeriod — should be capped using kernel default period (100000).
+	body := `{"Image":"alpine","HostConfig":{"CpuQuota":9999999}}`
+	result, err := p.ValidateAndSanitize([]byte(body))
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	var raw map[string]json.RawMessage
+	json.Unmarshal(result, &raw)
+	var rawHC map[string]json.RawMessage
+	json.Unmarshal(raw["HostConfig"], &rawHC)
+	var quota int64
+	json.Unmarshal(rawHC["CpuQuota"], &quota)
+	// MaxCPUs=1.0, default period=100000, so max quota = 100000
+	if quota != 100000 {
+		t.Fatalf("expected CpuQuota capped to 100000, got %d", quota)
+	}
+}
+
 func TestPassthroughUnchangedFields(t *testing.T) {
 	p := defaultPolicy()
 	body := `{"Image":"alpine","Cmd":["echo","hello"],"Env":["FOO=bar"]}`
@@ -385,7 +423,7 @@ func TestPreservesUnknownHostConfigFields(t *testing.T) {
 
 func TestOwnershipExactMatch(t *testing.T) {
 	o := NewOwnership()
-	o.Add("abc123def456abcdef")
+	o.Add("abc123def456abcdef", "")
 	if !o.Owns("abc123def456abcdef") {
 		t.Fatal("exact match failed")
 	}
@@ -393,7 +431,7 @@ func TestOwnershipExactMatch(t *testing.T) {
 
 func TestOwnershipPrefixRequiresMinLength(t *testing.T) {
 	o := NewOwnership()
-	o.Add("abc123def456abcdef")
+	o.Add("abc123def456abcdef", "")
 	// Short prefix (< 12 chars) should NOT match.
 	if o.Owns("abc") {
 		t.Fatal("short prefix should not match")
@@ -409,8 +447,7 @@ func TestOwnershipPrefixRequiresMinLength(t *testing.T) {
 
 func TestOwnershipNameMatch(t *testing.T) {
 	o := NewOwnership()
-	o.Add("abc123def456abcdef")
-	o.SetName("abc123def456abcdef", "my-container")
+	o.Add("abc123def456abcdef", "my-container")
 	if !o.Owns("my-container") {
 		t.Fatal("name match failed")
 	}
@@ -421,8 +458,7 @@ func TestOwnershipNameMatch(t *testing.T) {
 
 func TestOwnershipRemoveCleansName(t *testing.T) {
 	o := NewOwnership()
-	o.Add("abc123def456abcdef")
-	o.SetName("abc123def456abcdef", "my-container")
+	o.Add("abc123def456abcdef", "my-container")
 	o.Remove("abc123def456abcdef")
 	if o.Owns("my-container") {
 		t.Fatal("name should be cleaned up after Remove")
@@ -434,8 +470,7 @@ func TestOwnershipRemoveCleansName(t *testing.T) {
 
 func TestOwnershipFullID(t *testing.T) {
 	o := NewOwnership()
-	o.Add("abc123def456abcdef")
-	o.SetName("abc123def456abcdef", "my-container")
+	o.Add("abc123def456abcdef", "my-container")
 
 	if o.FullID("abc123def456abcdef") != "abc123def456abcdef" {
 		t.Fatal("FullID exact match failed")
@@ -448,6 +483,24 @@ func TestOwnershipFullID(t *testing.T) {
 	}
 	if o.FullID("xyz") != "" {
 		t.Fatal("FullID should return empty for unknown ref")
+	}
+}
+
+func TestOwnershipAmbiguousPrefix(t *testing.T) {
+	o := NewOwnership()
+	o.Add("abc123def456aaaa", "")
+	o.Add("abc123def456bbbb", "")
+	// Both match the prefix — Owns should still return true (any match).
+	if !o.Owns("abc123def456") {
+		t.Fatal("ambiguous prefix should still match for Owns")
+	}
+	// FullID should return "" for ambiguous prefix.
+	if o.FullID("abc123def456") != "" {
+		t.Fatal("ambiguous prefix should return empty FullID")
+	}
+	// Unique prefix should still work.
+	if o.FullID("abc123def456a") != "abc123def456aaaa" {
+		t.Fatal("unique prefix should resolve")
 	}
 }
 

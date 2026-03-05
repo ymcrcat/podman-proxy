@@ -72,6 +72,7 @@ func main() {
 	sigCh := make(chan os.Signal, 1)
 	signal.Notify(sigCh, syscall.SIGTERM, syscall.SIGINT)
 
+	done := make(chan struct{})
 	go func() {
 		sig := <-sigCh
 		log.Printf("[%s] Received %v, shutting down...", *agentID, sig)
@@ -83,6 +84,8 @@ func main() {
 
 		// 2. Clean up owned containers after all requests have completed.
 		proxy.CleanupContainers()
+
+		close(done)
 	}()
 
 	fmt.Printf("podman-proxy [%s] listening on %s\n", *agentID, *listenPath)
@@ -98,10 +101,7 @@ func main() {
 	}
 
 	// Wait for the signal handler goroutine to finish cleanup.
-	// server.Serve returns immediately after Shutdown is called,
-	// but we need to wait for CleanupContainers to complete.
-	// Use a small sleep to let the goroutine finish.
-	time.Sleep(100 * time.Millisecond)
+	<-done
 
 	log.Printf("[%s] Shutdown complete.", *agentID)
 }

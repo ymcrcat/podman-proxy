@@ -17,14 +17,22 @@ type Policy struct {
 	MaxCPUs       float64  // 0 = no limit
 }
 
-// dangerousCaps are capabilities that must always be stripped.
-var dangerousCaps = map[string]bool{
-	"SYS_ADMIN":  true,
-	"SYS_PTRACE": true,
-	"NET_ADMIN":  true,
-	"NET_RAW":    true,
-	"SYS_RAWIO":  true,
-	"MKNOD":      true,
+// allowedCaps is the allowlist of capabilities that may be added to containers.
+// Any capability not in this set (including "ALL") is stripped.
+var allowedCaps = map[string]bool{
+	"AUDIT_WRITE":       true,
+	"CHOWN":             true,
+	"DAC_OVERRIDE":      true,
+	"FOWNER":            true,
+	"FSETID":            true,
+	"KILL":              true,
+	"NET_BIND_SERVICE":  true,
+	"SETFCAP":           true,
+	"SETGID":            true,
+	"SETPCAP":           true,
+	"SETUID":            true,
+	"SYS_CHROOT":        true,
+	"NET_RAW":           true,
 }
 
 // hostConfig is the subset of HostConfig fields we inspect for validation.
@@ -142,11 +150,11 @@ func (p *Policy) ValidateAndSanitize(body []byte) ([]byte, error) {
 
 	// --- Silent sanitization (written back into rawHC) ---
 
-	// Strip dangerous capabilities.
+	// Strip capabilities not in the allowlist (including "ALL").
 	if len(hc.CapAdd) > 0 {
 		filtered := make([]string, 0, len(hc.CapAdd))
 		for _, cap := range hc.CapAdd {
-			if !dangerousCaps[strings.ToUpper(cap)] {
+			if allowedCaps[strings.ToUpper(cap)] {
 				filtered = append(filtered, cap)
 			}
 		}
@@ -177,8 +185,13 @@ func (p *Policy) ValidateAndSanitize(body []byte) ([]byte, error) {
 			rawHC["NanoCpus"] = b
 		}
 		// Also cap CpuQuota relative to CpuPeriod.
-		if hc.CpuPeriod > 0 && hc.CpuQuota > 0 {
-			maxQuota := int64(p.MaxCPUs * float64(hc.CpuPeriod))
+		// When CpuPeriod is 0 the kernel defaults to 100000µs.
+		if hc.CpuQuota > 0 {
+			period := hc.CpuPeriod
+			if period <= 0 {
+				period = 100000 // kernel default
+			}
+			maxQuota := int64(p.MaxCPUs * float64(period))
 			if hc.CpuQuota > maxQuota {
 				b, _ := json.Marshal(maxQuota)
 				rawHC["CpuQuota"] = b
@@ -264,20 +277,20 @@ func (p *Policy) validateHostPath(hostPath string) error {
 		return fmt.Errorf("invalid bind mount path %q: %w", hostPath, err)
 	}
 
+	// Reject if the user-supplied path itself is a symlink (pre-resolution).
+	// This reduces the TOCTOU window where a directory could be swapped for
+	// a symlink between validation and the actual mount by podman.
+	if info, err := os.Lstat(absPath); err == nil {
+		if info.Mode()&os.ModeSymlink != 0 {
+			return fmt.Errorf("bind mount %q is a symlink (not allowed)", hostPath)
+		}
+	}
+
 	// Resolve symlinks to get canonical path.
 	realPath, err := filepath.EvalSymlinks(absPath)
 	if err != nil {
 		// Path may not exist yet — resolve the nearest existing ancestor.
 		realPath = resolvePartial(absPath)
-	}
-
-	// Additional defense: reject if the resolved path is itself a symlink.
-	// This mitigates TOCTOU attacks where a directory is swapped for a symlink
-	// between validation and the actual mount.
-	if info, err := os.Lstat(realPath); err == nil {
-		if info.Mode()&os.ModeSymlink != 0 {
-			return fmt.Errorf("bind mount %q is a symlink (not allowed)", hostPath)
-		}
 	}
 
 	if !isSubpath(wsReal, realPath) {
@@ -337,19 +350,16 @@ func NewOwnership() *Ownership {
 	}
 }
 
-// Add registers a container ID as owned.
-func (o *Ownership) Add(id string) {
+// Add registers a container ID as owned, with an optional name.
+// Passing an empty name registers the ID only.
+func (o *Ownership) Add(id, name string) {
 	o.mu.Lock()
 	defer o.mu.Unlock()
 	o.ids[id] = true
-}
-
-// SetName associates a container name with an owned container ID.
-func (o *Ownership) SetName(id, name string) {
-	o.mu.Lock()
-	defer o.mu.Unlock()
-	o.names[name] = id
-	o.idToName[id] = name
+	if name != "" {
+		o.names[name] = id
+		o.idToName[id] = name
+	}
 }
 
 // Remove unregisters a container ID and its associated name.
@@ -388,6 +398,7 @@ func (o *Ownership) Owns(ref string) bool {
 }
 
 // FullID resolves a reference to a full container ID, or returns "" if not owned.
+// Returns "" if the prefix is ambiguous (matches multiple owned containers).
 func (o *Ownership) FullID(ref string) string {
 	o.mu.RLock()
 	defer o.mu.RUnlock()
@@ -399,11 +410,16 @@ func (o *Ownership) FullID(ref string) string {
 		return id
 	}
 	if len(ref) >= minPrefixLen {
+		var match string
 		for id := range o.ids {
 			if strings.HasPrefix(id, ref) {
-				return id
+				if match != "" {
+					return "" // ambiguous prefix
+				}
+				match = id
 			}
 		}
+		return match
 	}
 	return ""
 }

@@ -49,12 +49,40 @@ var allowedContainerActions = map[string]bool{
 	"remove":  true,
 }
 
+// allowedResponseHeaders is the set of upstream headers forwarded to clients.
+// Everything else is stripped to avoid leaking infrastructure details.
+var allowedResponseHeaders = map[string]bool{
+	"Content-Type":           true,
+	"Content-Length":         true,
+	"Docker-Experimental":   true,
+	"Api-Version":           true,
+	"Ostype":                true,
+	"Date":                  true,
+	"Transfer-Encoding":     true,
+}
+
 // Proxy is the HTTP handler that enforces policy and forwards to podman.
 type Proxy struct {
 	PodmanSocket string
 	Policy       *Policy
 	Ownership    *Ownership
 	AgentID      string
+	transport    *http.Transport
+}
+
+func (p *Proxy) getTransport() *http.Transport {
+	if p.transport == nil {
+		p.transport = &http.Transport{
+			DialContext: func(ctx context.Context, _, _ string) (net.Conn, error) {
+				d := net.Dialer{Timeout: dialTimeout}
+				return d.DialContext(ctx, "unix", p.PodmanSocket)
+			},
+			MaxIdleConns:        10,
+			IdleConnTimeout:     90 * time.Second,
+			MaxIdleConnsPerHost: 10,
+		}
+	}
+	return p.transport
 }
 
 func (p *Proxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
@@ -127,11 +155,8 @@ func (p *Proxy) handleCreate(w http.ResponseWriter, r *http.Request) {
 			Id string `json:"Id"`
 		}
 		if json.Unmarshal(respBody, &createResp) == nil && createResp.Id != "" {
-			p.Ownership.Add(createResp.Id)
-			// Track name if provided in query parameter.
-			if name := r.URL.Query().Get("name"); name != "" {
-				p.Ownership.SetName(createResp.Id, name)
-			}
+			name := r.URL.Query().Get("name")
+			p.Ownership.Add(createResp.Id, name)
 			short := createResp.Id
 			if len(short) > 12 {
 				short = short[:12]
@@ -245,13 +270,8 @@ func (p *Proxy) forward(w http.ResponseWriter, r *http.Request, body []byte) {
 // doForward performs the actual HTTP request to the podman socket.
 func (p *Proxy) doForward(r *http.Request, overrideBody []byte) (*http.Response, []byte, error) {
 	client := &http.Client{
-		Timeout: clientTimeout,
-		Transport: &http.Transport{
-			DialContext: func(ctx context.Context, _, _ string) (net.Conn, error) {
-				d := net.Dialer{Timeout: dialTimeout}
-				return d.DialContext(ctx, "unix", p.PodmanSocket)
-			},
-		},
+		Timeout:   clientTimeout,
+		Transport: p.getTransport(),
 	}
 
 	var bodyReader io.Reader
@@ -296,8 +316,12 @@ func (p *Proxy) doForward(r *http.Request, overrideBody []byte) (*http.Response,
 }
 
 // writeResponse copies an upstream response back to the client.
+// Only allowlisted headers are forwarded to avoid leaking infrastructure details.
 func writeResponse(w http.ResponseWriter, resp *http.Response, body []byte) {
 	for k, vv := range resp.Header {
+		if !allowedResponseHeaders[http.CanonicalHeaderKey(k)] {
+			continue
+		}
 		for _, v := range vv {
 			w.Header().Add(k, v)
 		}
@@ -316,13 +340,8 @@ func (p *Proxy) CleanupContainers() {
 	log.Printf("[%s] Cleaning up %d owned containers...", p.AgentID, len(ids))
 
 	client := &http.Client{
-		Timeout: 30 * time.Second,
-		Transport: &http.Transport{
-			DialContext: func(ctx context.Context, _, _ string) (net.Conn, error) {
-				d := net.Dialer{Timeout: dialTimeout}
-				return d.DialContext(ctx, "unix", p.PodmanSocket)
-			},
-		},
+		Timeout:   30 * time.Second,
+		Transport: p.getTransport(),
 	}
 
 	for _, id := range ids {
