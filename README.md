@@ -4,6 +4,29 @@ A thin Go proxy that sits between containers and the real podman socket, enforci
 
 Each proxy instance exposes a Unix socket that looks like a standard Docker/Podman API endpoint, but restricts what callers can do: no privileged containers, no host filesystem access outside a designated workspace directory, no dangerous capabilities, and each caller can only see and manage containers it created. Run one proxy per tenant to get per-tenant isolation without giving anyone unrestricted access to the podman socket.
 
+## Architecture
+
+Each tenant container gets its own proxy process and socket. They don't share — each proxy tracks its own set of created containers independently.
+
+```
+                        ┌─────────────┐
+  tenant-1 container    │  proxy-1    │
+  /var/run/docker.sock ─┤  tenant-1   ├──┐
+                        └─────────────┘  │
+                                         │
+                        ┌─────────────┐  │  ┌────────────────┐
+  tenant-2 container    │  proxy-2    │  ├──┤ podman.sock    │
+  /var/run/docker.sock ─┤  tenant-2   ├──┤  └────────────────┘
+                        └─────────────┘  │
+                                         │
+                        ┌─────────────┐  │
+  tenant-3 container    │  proxy-3    │  │
+  /var/run/docker.sock ─┤  tenant-3   ├──┘
+                        └─────────────┘
+```
+
+All proxies forward to the same podman socket — podman handles the actual container lifecycle. The proxies gate what each tenant is allowed to ask for, and filter responses so tenants only see their own containers.
+
 ## Build
 
 Requires Go 1.21+. No external dependencies.
