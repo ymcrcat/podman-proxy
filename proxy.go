@@ -352,8 +352,8 @@ func (p *Proxy) handleContainerOp(w http.ResponseWriter, r *http.Request, versio
 	sanitizedQuery := url.Values{}
 	if allowed, ok := allowedActionParams[action]; ok {
 		for k, vv := range r.URL.Query() {
-			if allowed[k] {
-				sanitizedQuery[k] = vv
+			if allowed[k] && len(vv) > 0 {
+				sanitizedQuery.Set(k, vv[0]) // only forward first value to match validation
 			}
 		}
 	}
@@ -389,6 +389,14 @@ func (p *Proxy) handleContainerOp(w http.ResponseWriter, r *http.Request, versio
 			}
 			if !validConditions[cond] {
 				sanitizedQuery.Del("condition")
+			}
+		}
+	}
+	if action == "logs" {
+		if tail := sanitizedQuery.Get("tail"); tail != "" && tail != "all" {
+			n, err := strconv.ParseInt(tail, 10, 64)
+			if err != nil || n < 0 || n > 100000 {
+				sanitizedQuery.Del("tail")
 			}
 		}
 	}

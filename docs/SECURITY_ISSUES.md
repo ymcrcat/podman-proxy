@@ -1,6 +1,6 @@
 # Security Issues Found
 
-76 issues found and fixed across 12 rounds of security review. All issues were found through automated code review and fixed with corresponding tests.
+83 issues found and fixed across 13 rounds of security review. All issues were found through automated code review and fixed with corresponding tests.
 
 ## Round 1 — 22 issues (foundational hardening)
 
@@ -140,23 +140,36 @@ Established the core security model.
 | 3 | Input validation | `resize?h`/`w` not validated as bounded integers (0–65535) before forwarding to kernel ioctl | LOW |
 | 4 | Input validation | `wait?condition` not validated against documented allowlist | LOW |
 
+## Round 13 — 7 issues
+
+| # | Category | Issue | Severity |
+|---|----------|-------|----------|
+| 1 | Input validation | Multi-value query parameter bypass — `?t=5&t=99999` forwards both values, only first validated | IMPORTANT |
+| 2 | Resources | `ShmSize` passes through — tmpfs memory exhaustion beyond cgroup Memory limit on cgroups v1 | IMPORTANT |
+| 3 | Isolation | `CgroupParent` passes through — cgroup hierarchy escape, resource accounting bypass | IMPORTANT |
+| 4 | Policy bypass | `Runtime` passes through — OCI runtime downgrade to less secure runtime | IMPORTANT |
+| 5 | Isolation | `AutoRemove` not stripped — stale ownership entries, unbounded memory growth | IMPORTANT |
+| 6 | Resources | `Ulimits` passes through — `RLIMIT_NOFILE` exhaustion | LOW |
+| 7 | Input validation | `logs?tail` not validated — unbounded integer forwarded to Podman | LOW |
+
 ## Summary by category
 
 | Category | Count | Rounds |
 |----------|-------|--------|
-| Resource limits (CPU/memory/PIDs/swap) | 14 | 1, 4, 5, 6, 7, 8, 10 |
+| Resource limits (CPU/memory/PIDs/swap) | 16 | 1, 4, 5, 6, 7, 8, 10, 13 |
 | Namespace escape | 11 | 1, 5, 6, 8 |
 | Filesystem/bind mounts | 8 | 1, 2, 8, 10 |
-| Ownership/isolation | 9 | 1, 3, 9, 12 |
+| Ownership/isolation | 11 | 1, 3, 9, 12, 13 |
 | Capability/kernel | 6 | 1, 2, 11 |
-| Request smuggling/injection | 4 | 2, 4 |
+| Request smuggling/injection | 5 | 2, 4, 13 |
 | API surface/method control | 6 | 1, 4, 5, 9 |
 | Networking | 1 | 12 |
 | Information leaks | 3 | 2, 4, 7 |
 | DoS vectors | 8 | 4, 5, 7, 9, 11 |
-| Input validation | 6 | 5, 6, 7, 11, 12 |
+| Input validation | 8 | 5, 6, 7, 11, 12, 13 |
+| Policy bypass | 1 | 13 |
 
-**Totals: 24 CRITICAL, 43 IMPORTANT, 9 LOW.**
+**Totals: 24 CRITICAL, 50 IMPORTANT, 9 LOW.**
 
 ## Recurring patterns
 

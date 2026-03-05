@@ -3067,6 +3067,195 @@ func TestWaitConditionValidation(t *testing.T) {
 	}
 }
 
+// --- Round 13 tests ---
+
+func TestMultiValueQueryParamOnlyFirstForwarded(t *testing.T) {
+	cid := "3344556677889900112233445566778899001122334455667788990011223344"
+	var capturedQuery string
+	podmanSock, cleanup := mockPodman(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		capturedQuery = r.URL.RawQuery
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer cleanup()
+
+	sockPath := testSockPath(t, "x")
+	proxy := &Proxy{
+		PodmanSocket: podmanSock,
+		Policy:       defaultPolicy(),
+		Ownership:    NewOwnership(),
+		AgentID:      "test",
+	}
+	listener, err := net.Listen("unix", sockPath)
+	if err != nil {
+		t.Fatalf("listen: %v", err)
+	}
+	server := &http.Server{Handler: proxy}
+	go server.Serve(listener)
+	defer func() { server.Close(); listener.Close() }()
+	proxy.Ownership.Add(cid, "")
+	client := unixClient(sockPath)
+
+	// Multi-value t: only first (valid) value should be forwarded
+	resp, err := client.Post(
+		"http://localhost/v4.0.0/containers/"+cid+"/stop?t=5&t=99999",
+		"", nil,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	resp.Body.Close()
+	if strings.Count(capturedQuery, "t=") != 1 {
+		t.Fatalf("expected exactly one t= param, got %q", capturedQuery)
+	}
+	if !strings.Contains(capturedQuery, "t=5") {
+		t.Fatalf("expected t=5, got %q", capturedQuery)
+	}
+}
+
+func TestStripShmSize(t *testing.T) {
+	p := defaultPolicy()
+	body := `{"Image":"alpine","HostConfig":{"ShmSize":137438953472}}`
+	result, err := p.ValidateAndSanitize([]byte(body))
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	var raw map[string]json.RawMessage
+	json.Unmarshal(result, &raw)
+	var rawHC map[string]json.RawMessage
+	json.Unmarshal(raw["HostConfig"], &rawHC)
+	if _, ok := rawHC["ShmSize"]; ok {
+		t.Fatal("ShmSize should have been stripped")
+	}
+}
+
+func TestStripCgroupParent(t *testing.T) {
+	p := defaultPolicy()
+	body := `{"Image":"alpine","HostConfig":{"CgroupParent":"/sys/fs/cgroup"}}`
+	result, err := p.ValidateAndSanitize([]byte(body))
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	var raw map[string]json.RawMessage
+	json.Unmarshal(result, &raw)
+	var rawHC map[string]json.RawMessage
+	json.Unmarshal(raw["HostConfig"], &rawHC)
+	if _, ok := rawHC["CgroupParent"]; ok {
+		t.Fatal("CgroupParent should have been stripped")
+	}
+}
+
+func TestStripRuntime(t *testing.T) {
+	p := defaultPolicy()
+	body := `{"Image":"alpine","HostConfig":{"Runtime":"runc"}}`
+	result, err := p.ValidateAndSanitize([]byte(body))
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	var raw map[string]json.RawMessage
+	json.Unmarshal(result, &raw)
+	var rawHC map[string]json.RawMessage
+	json.Unmarshal(raw["HostConfig"], &rawHC)
+	if _, ok := rawHC["Runtime"]; ok {
+		t.Fatal("Runtime should have been stripped")
+	}
+}
+
+func TestStripAutoRemove(t *testing.T) {
+	p := defaultPolicy()
+	body := `{"Image":"alpine","HostConfig":{"AutoRemove":true}}`
+	result, err := p.ValidateAndSanitize([]byte(body))
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	var raw map[string]json.RawMessage
+	json.Unmarshal(result, &raw)
+	var rawHC map[string]json.RawMessage
+	json.Unmarshal(raw["HostConfig"], &rawHC)
+	if _, ok := rawHC["AutoRemove"]; ok {
+		t.Fatal("AutoRemove should have been stripped")
+	}
+}
+
+func TestStripUlimits(t *testing.T) {
+	p := defaultPolicy()
+	body := `{"Image":"alpine","HostConfig":{"Ulimits":[{"Name":"nofile","Soft":1048576,"Hard":1048576}]}}`
+	result, err := p.ValidateAndSanitize([]byte(body))
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	var raw map[string]json.RawMessage
+	json.Unmarshal(result, &raw)
+	var rawHC map[string]json.RawMessage
+	json.Unmarshal(raw["HostConfig"], &rawHC)
+	if _, ok := rawHC["Ulimits"]; ok {
+		t.Fatal("Ulimits should have been stripped")
+	}
+}
+
+func TestLogsTailValidation(t *testing.T) {
+	cid := "4455667788990011223344556677889900112233445566778899001122334455"
+	var capturedQuery string
+	podmanSock, cleanup := mockPodman(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		capturedQuery = r.URL.RawQuery
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer cleanup()
+
+	sockPath := testSockPath(t, "x")
+	proxy := &Proxy{
+		PodmanSocket: podmanSock,
+		Policy:       defaultPolicy(),
+		Ownership:    NewOwnership(),
+		AgentID:      "test",
+		streamSem:    make(chan struct{}, maxConcurrentStream),
+	}
+	listener, err := net.Listen("unix", sockPath)
+	if err != nil {
+		t.Fatalf("listen: %v", err)
+	}
+	server := &http.Server{Handler: proxy}
+	go server.Serve(listener)
+	defer func() { server.Close(); listener.Close() }()
+	proxy.Ownership.Add(cid, "")
+	client := unixClient(sockPath)
+
+	// tail=100 should pass
+	resp, err := client.Get(
+		"http://localhost/v4.0.0/containers/" + cid + "/logs?stdout=true&tail=100",
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	resp.Body.Close()
+	if !strings.Contains(capturedQuery, "tail=100") {
+		t.Fatalf("valid tail should pass, got %q", capturedQuery)
+	}
+
+	// tail=all should pass
+	resp, err = client.Get(
+		"http://localhost/v4.0.0/containers/" + cid + "/logs?stdout=true&tail=all",
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	resp.Body.Close()
+	if !strings.Contains(capturedQuery, "tail=all") {
+		t.Fatalf("tail=all should pass, got %q", capturedQuery)
+	}
+
+	// tail=-1 should be stripped
+	resp, err = client.Get(
+		"http://localhost/v4.0.0/containers/" + cid + "/logs?stdout=true&tail=-1",
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	resp.Body.Close()
+	if strings.Contains(capturedQuery, "tail") {
+		t.Fatalf("negative tail should be stripped, got %q", capturedQuery)
+	}
+}
+
 func init() {
 	_ = os.Stderr
 }

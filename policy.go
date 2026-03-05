@@ -203,6 +203,26 @@ func (p *Policy) ValidateAndSanitize(body []byte) ([]byte, error) {
 	// Strip PublishAllPorts — same rationale as PortBindings.
 	delete(rawHC, "PublishAllPorts")
 
+	// Strip ShmSize — on cgroups v1, /dev/shm tmpfs memory is not counted
+	// against the cgroup Memory limit, allowing memory exhaustion beyond MaxMemory.
+	delete(rawHC, "ShmSize")
+
+	// Strip CgroupParent — prevents agents from placing containers in
+	// arbitrary cgroup hierarchies, bypassing resource accounting.
+	delete(rawHC, "CgroupParent")
+
+	// Strip Runtime — prevents agents from downgrading to a less secure
+	// OCI runtime if the operator configured a secure default.
+	delete(rawHC, "Runtime")
+
+	// Strip AutoRemove — containers that self-remove leave stale entries
+	// in the ownership table. Agents should use explicit DELETE instead.
+	delete(rawHC, "AutoRemove")
+
+	// Strip Ulimits — prevents RLIMIT_NOFILE exhaustion and other
+	// per-container resource limit manipulation.
+	delete(rawHC, "Ulimits")
+
 	// Cap memory. Always enforce when MaxMemory is configured (Memory=0 means
 	// unlimited in Podman, which would bypass the limit).
 	effectiveMemory := hc.Memory
