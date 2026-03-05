@@ -1476,8 +1476,10 @@ func TestListStripsSizeParam(t *testing.T) {
 func TestStreamingSemaphore(t *testing.T) {
 	containerID := "abcdef1234560000abcdef1234560000abcdef1234560000abcdef12345600ab"
 
-	// Use a channel to hold the log stream open until we release it.
+	// Use channels to synchronize: podmanReached signals that the first
+	// stream has reached the mock podman (meaning the semaphore is held).
 	holdOpen := make(chan struct{})
+	podmanReached := make(chan struct{}, 1) // buffered so non-blocking send
 	podman := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if strings.Contains(r.URL.Path, "/containers/create") {
 			w.WriteHeader(http.StatusCreated)
@@ -1488,6 +1490,10 @@ func TestStreamingSemaphore(t *testing.T) {
 			w.Header().Set("Content-Type", "application/octet-stream")
 			w.WriteHeader(http.StatusOK)
 			w.(http.Flusher).Flush()
+			select {
+			case podmanReached <- struct{}{}:
+			default:
+			}
 			<-holdOpen // block until released
 			return
 		}
@@ -1529,32 +1535,25 @@ func TestStreamingSemaphore(t *testing.T) {
 	resp.Body.Close()
 
 	// First streaming connection — should succeed (fills the semaphore).
-	done := make(chan int, 1)
 	go func() {
 		resp, err := client.Get("http://localhost/v4.0.0/containers/" + containerID + "/logs?stdout=true")
 		if err != nil {
-			done <- 0
 			return
 		}
-		done <- resp.StatusCode
 		resp.Body.Close()
 	}()
 
-	// Give the first stream time to acquire the semaphore.
-	// Use a second client to avoid connection reuse issues.
+	// Wait for the first stream to actually reach podman (semaphore is held).
+	<-podmanReached
+
+	// Second streaming connection — semaphore should be full, expect 503.
 	client2 := unixClient(sockPath)
-	var secondStatus int
-	for i := 0; i < 50; i++ {
-		resp, err = client2.Get("http://localhost/v4.0.0/containers/" + containerID + "/logs?stdout=true")
-		if err != nil {
-			t.Fatalf("second stream request: %v", err)
-		}
-		secondStatus = resp.StatusCode
-		resp.Body.Close()
-		if secondStatus == http.StatusServiceUnavailable {
-			break
-		}
+	resp, err = client2.Get("http://localhost/v4.0.0/containers/" + containerID + "/logs?stdout=true")
+	if err != nil {
+		t.Fatalf("second stream request: %v", err)
 	}
+	secondStatus := resp.StatusCode
+	resp.Body.Close()
 
 	if secondStatus != http.StatusServiceUnavailable {
 		t.Fatalf("expected 503 when streaming semaphore full, got %d", secondStatus)
@@ -3435,6 +3434,145 @@ func TestStreamingActionBodyDiscarded(t *testing.T) {
 	resp.Body.Close()
 	if len(capturedBody) > 0 {
 		t.Fatalf("streaming action body should have been discarded, got %q", string(capturedBody))
+	}
+}
+
+func TestStripCapDrop(t *testing.T) {
+	podmanSock, cleanup := mockPodman(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		body, _ := io.ReadAll(r.Body)
+		var raw map[string]json.RawMessage
+		json.Unmarshal(body, &raw)
+		var hc map[string]json.RawMessage
+		json.Unmarshal(raw["HostConfig"], &hc)
+		if _, ok := hc["CapDrop"]; ok {
+			t.Error("CapDrop should have been stripped")
+		}
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(201)
+		w.Write([]byte(`{"Id":"aabb112233445566778899001122334455667788aabb112233445566778899"}`))
+	}))
+	defer cleanup()
+	proxySock, pCleanup := startProxy(t, podmanSock, defaultPolicy())
+	defer pCleanup()
+	client := unixClient(proxySock)
+
+	resp, err := client.Post("http://localhost/v4.0.0/containers/create", "application/json",
+		strings.NewReader(`{"Image":"alpine","HostConfig":{"CapDrop":["ALL"]}}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	resp.Body.Close()
+	if resp.StatusCode != 201 {
+		t.Fatalf("expected 201, got %d", resp.StatusCode)
+	}
+}
+
+func TestStripStorageOpt(t *testing.T) {
+	podmanSock, cleanup := mockPodman(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		body, _ := io.ReadAll(r.Body)
+		var raw map[string]json.RawMessage
+		json.Unmarshal(body, &raw)
+		var hc map[string]json.RawMessage
+		json.Unmarshal(raw["HostConfig"], &hc)
+		if _, ok := hc["StorageOpt"]; ok {
+			t.Error("StorageOpt should have been stripped")
+		}
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(201)
+		w.Write([]byte(`{"Id":"ccdd112233445566778899001122334455667788ccdd112233445566778899"}`))
+	}))
+	defer cleanup()
+	proxySock, pCleanup := startProxy(t, podmanSock, defaultPolicy())
+	defer pCleanup()
+	client := unixClient(proxySock)
+
+	resp, err := client.Post("http://localhost/v4.0.0/containers/create", "application/json",
+		strings.NewReader(`{"Image":"alpine","HostConfig":{"StorageOpt":{"size":"1000G"}}}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	resp.Body.Close()
+	if resp.StatusCode != 201 {
+		t.Fatalf("expected 201, got %d", resp.StatusCode)
+	}
+}
+
+func TestInvalidContainerRefRejected(t *testing.T) {
+	podmanSock, cleanup := mockPodman(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		t.Error("request should not have been forwarded")
+		w.WriteHeader(200)
+	}))
+	defer cleanup()
+	proxySock, pCleanup := startProxy(t, podmanSock, defaultPolicy())
+	defer pCleanup()
+	client := unixClient(proxySock)
+
+	// Container ref with newlines (log injection attempt)
+	badRefs := []string{
+		"foo%0aINJECTED",   // URL-encoded newline
+		"foo\nbar",          // literal newline
+		"../escape",         // path traversal-like
+		"@special",          // starts with special char
+	}
+	for _, ref := range badRefs {
+		resp, err := client.Get("http://localhost/v4.0.0/containers/" + ref + "/json")
+		if err != nil {
+			continue // connection error is fine for invalid URLs
+		}
+		resp.Body.Close()
+		if resp.StatusCode != http.StatusForbidden {
+			t.Errorf("ref %q: expected 403, got %d", ref, resp.StatusCode)
+		}
+	}
+}
+
+func TestListAllParamValidation(t *testing.T) {
+	var capturedQuery string
+	podmanSock, cleanup := mockPodman(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		capturedQuery = r.URL.RawQuery
+		w.Header().Set("Content-Type", "application/json")
+		w.Write([]byte("[]"))
+	}))
+	defer cleanup()
+	proxySock, pCleanup := startProxy(t, podmanSock, defaultPolicy())
+	defer pCleanup()
+	client := unixClient(proxySock)
+
+	// Valid value should pass through
+	resp, _ := client.Get("http://localhost/v4.0.0/containers/json?all=true")
+	resp.Body.Close()
+	if !strings.Contains(capturedQuery, "all=true") {
+		t.Errorf("expected all=true to pass through, got %q", capturedQuery)
+	}
+
+	// Invalid value should be stripped
+	resp, _ = client.Get("http://localhost/v4.0.0/containers/json?all=malicious")
+	resp.Body.Close()
+	if strings.Contains(capturedQuery, "all=") {
+		t.Errorf("expected all=malicious to be stripped, got %q", capturedQuery)
+	}
+}
+
+func TestPingBodyDiscarded(t *testing.T) {
+	var capturedBody []byte
+	podmanSock, cleanup := mockPodman(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		capturedBody, _ = io.ReadAll(r.Body)
+		w.Write([]byte("OK"))
+	}))
+	defer cleanup()
+	proxySock, pCleanup := startProxy(t, podmanSock, defaultPolicy())
+	defer pCleanup()
+	client := unixClient(proxySock)
+
+	// Send a body with ping — it should be discarded
+	req, _ := http.NewRequest("GET", "http://localhost/_ping", strings.NewReader("injected body content"))
+	resp, err := client.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	resp.Body.Close()
+	if len(capturedBody) > 0 {
+		t.Fatalf("ping body should have been discarded, got %q", string(capturedBody))
 	}
 }
 

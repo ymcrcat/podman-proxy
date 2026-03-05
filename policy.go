@@ -223,6 +223,15 @@ func (p *Policy) ValidateAndSanitize(body []byte) ([]byte, error) {
 	// per-container resource limit manipulation.
 	delete(rawHC, "Ulimits")
 
+	// Strip CapDrop — agents should not manipulate which capabilities are
+	// dropped from the default set. On some runtimes an empty CapDrop can
+	// re-grant capabilities that the default OCI profile drops.
+	delete(rawHC, "CapDrop")
+
+	// Strip StorageOpt — prevents agents from setting unbounded container
+	// storage quotas (e.g. size=1000G) that could exhaust host disk space.
+	delete(rawHC, "StorageOpt")
+
 	// Cap memory. Always enforce when MaxMemory is configured (Memory=0 means
 	// unlimited in Podman, which would bypass the limit).
 	effectiveMemory := hc.Memory

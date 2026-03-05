@@ -149,6 +149,8 @@ func (p *Proxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		strippedURL := *r.URL
 		strippedURL.RawQuery = ""
 		stripped.URL = &strippedURL
+		stripped.Body = http.NoBody
+		stripped.ContentLength = 0
 		p.forward(w, &stripped, nil)
 		return
 	}
@@ -174,6 +176,13 @@ func (p *Proxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		// Guard: "create" and "json" as container refs are routing artifacts.
 		if containerRef == "create" || containerRef == "json" {
 			http.Error(w, "forbidden", http.StatusForbidden)
+			return
+		}
+
+		// Validate containerRef format before use in ownership lookup and logs.
+		// Prevents log injection via newlines/escape sequences in URL path.
+		if !containerIDRe.MatchString(containerRef) && !containerNameRe.MatchString(containerRef) {
+			http.Error(w, "forbidden: invalid container reference", http.StatusForbidden)
 			return
 		}
 
@@ -257,6 +266,10 @@ func (p *Proxy) handleList(w http.ResponseWriter, r *http.Request) {
 		if !allowedListParams[k] {
 			q.Del(k)
 		}
+	}
+	// Validate "all" is a proper boolean value.
+	if allVal := q.Get("all"); allVal != "" && allVal != "true" && allVal != "1" {
+		q.Del("all")
 	}
 	// Validate limit is a reasonable positive integer to prevent host-wide
 	// container enumeration DoS on Podman.

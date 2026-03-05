@@ -1,6 +1,6 @@
 # Security Issues Found
 
-89 issues found and fixed across 15 rounds of security review. All issues were found through automated code review and fixed with corresponding tests.
+94 issues found and fixed across 16 rounds of security review. All issues were found through automated code review and fixed with corresponding tests.
 
 ## Round 1 — 22 issues (foundational hardening)
 
@@ -156,18 +156,18 @@ Established the core security model.
 
 | Category | Count | Rounds |
 |----------|-------|--------|
-| Resource limits (CPU/memory/PIDs/swap) | 16 | 1, 4, 5, 6, 7, 8, 10, 13 |
+| Resource limits (CPU/memory/PIDs/swap) | 17 | 1, 4, 5, 6, 7, 8, 10, 13, 16 |
 | Namespace escape | 11 | 1, 5, 6, 8 |
 | Filesystem/bind mounts | 8 | 1, 2, 8, 10 |
 | Ownership/isolation | 11 | 1, 3, 9, 12, 13 |
-| Capability/kernel | 6 | 1, 2, 11 |
+| Capability/kernel | 7 | 1, 2, 11, 16 |
 | Request smuggling/injection | 5 | 2, 4, 13 |
 | API surface/method control | 6 | 1, 4, 5, 9 |
 | Networking | 1 | 12 |
 | Information leaks | 3 | 2, 4, 7 |
 | DoS vectors | 8 | 4, 5, 7, 9, 11 |
-| Input validation | 8 | 5, 6, 7, 11, 12, 13 |
-| Policy bypass | 2 | 13, 15 |
+| Input validation | 10 | 5, 6, 7, 11, 12, 13, 16 |
+| Policy bypass | 3 | 13, 15, 16 |
 
 ## Round 14 — 5 issues
 
@@ -188,6 +188,18 @@ Established the core security model.
 | 1 | Policy bypass | `streamForward` forwards request body for `wait` (POST streaming action) — violates body-discard invariant | IMPORTANT |
 
 **Totals: 24 CRITICAL, 56 IMPORTANT, 9 LOW.**
+
+## Round 16 — 5 issues
+
+| # | Category | Issue | Severity |
+|---|----------|-------|----------|
+| 1 | Capability | `CapDrop` not sanitized — agents can manipulate default capability drop list | CRITICAL |
+| 2 | Input validation | `containerRef` not validated before log output — log injection via newlines/escape sequences | IMPORTANT |
+| 3 | Input validation | `all` query param in list forwarded without value validation | IMPORTANT |
+| 4 | Policy bypass | Ping/version forwards original request body to Podman (unnecessary data channel) | IMPORTANT |
+| 5 | Resources | `StorageOpt` not stripped from HostConfig — container disk quota manipulation | IMPORTANT |
+
+**Totals: 25 CRITICAL, 60 IMPORTANT, 9 LOW.**
 
 ## Recurring patterns
 
