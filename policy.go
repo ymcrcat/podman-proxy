@@ -192,20 +192,22 @@ func (p *Policy) ValidateAndSanitize(body []byte) ([]byte, error) {
 
 	// Cap memory. Always enforce when MaxMemory is configured (Memory=0 means
 	// unlimited in Podman, which would bypass the limit).
+	effectiveMemory := hc.Memory
 	if p.MaxMemory > 0 {
 		if hc.Memory <= 0 || hc.Memory > p.MaxMemory {
+			effectiveMemory = p.MaxMemory
 			b, _ := json.Marshal(p.MaxMemory)
 			rawHC["Memory"] = b
 		}
 	}
 
-	// Cap MemorySwap. 0 or -1 means unlimited swap in Podman.
-	// Always enforce to MaxMemory (disabling swap) to prevent swap-based memory limit bypass.
-	if p.MaxMemory > 0 {
-		if hc.MemorySwap <= 0 || hc.MemorySwap > p.MaxMemory {
-			b, _ := json.Marshal(p.MaxMemory)
-			rawHC["MemorySwap"] = b
-		}
+	// Disable swap by setting MemorySwap == effectiveMemory. In Linux cgroups,
+	// MemorySwap is the total memory+swap limit, so setting it equal to Memory
+	// means zero swap. Previously this was set to MaxMemory, which allowed
+	// (MaxMemory - Memory) bytes of swap when Memory < MaxMemory.
+	if p.MaxMemory > 0 && effectiveMemory > 0 {
+		b, _ := json.Marshal(effectiveMemory)
+		rawHC["MemorySwap"] = b
 	}
 
 	// Cap CPUs via NanoCpus. Always enforce when MaxCPUs is configured
@@ -276,7 +278,9 @@ func (p *Policy) validateBinds(binds []string) error {
 	return nil
 }
 
-// validateMounts checks that all bind-type Mounts have sources under the workspace.
+// validateMounts checks Mounts using an allowlist of safe types.
+// Only bind (with workspace path validation), tmpfs, and volume are permitted.
+// Other types (e.g. "image") are rejected to prevent image allowlist bypass.
 func (p *Policy) validateMounts(rawHC map[string]json.RawMessage) error {
 	mountsRaw, ok := rawHC["Mounts"]
 	if !ok || len(mountsRaw) == 0 || string(mountsRaw) == "null" {
@@ -287,13 +291,18 @@ func (p *Policy) validateMounts(rawHC map[string]json.RawMessage) error {
 		return fmt.Errorf("invalid Mounts field: %w", err)
 	}
 	for _, m := range mounts {
-		if strings.EqualFold(m.Type, "bind") {
+		switch strings.ToLower(m.Type) {
+		case "bind":
 			if m.Source == "" {
 				return fmt.Errorf("empty source in bind mount")
 			}
 			if err := p.validateHostPath(m.Source); err != nil {
 				return err
 			}
+		case "tmpfs", "volume":
+			// Safe — no host path to validate.
+		default:
+			return fmt.Errorf("mount type %q is not allowed", m.Type)
 		}
 	}
 	return nil

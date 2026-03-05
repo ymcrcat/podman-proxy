@@ -1,6 +1,6 @@
 # Security Issues Found
 
-67 issues found and fixed across 9 rounds of security review. All issues were found through automated code review and fixed with corresponding tests.
+69 issues found and fixed across 10 rounds of security review. All issues were found through automated code review and fixed with corresponding tests.
 
 ## Round 1 — 22 issues (foundational hardening)
 
@@ -116,13 +116,20 @@ Established the core security model.
 | 3 | API surface | `ping`/`version` endpoints had no HTTP method restriction, passed through all query params and body | IMPORTANT |
 | 4 | Isolation | `rename` forwarded invalid name to Podman before validation — proxy/Podman ownership desync | IMPORTANT |
 
+## Round 10 — 2 issues
+
+| # | Category | Issue | Severity |
+|---|----------|-------|----------|
+| 1 | Filesystem | `type=image` mounts bypass image allowlist — `validateMounts` only checked `bind` type | IMPORTANT |
+| 2 | Resources | `MemorySwap` cap did not disable swap when `Memory < MaxMemory` — swap = MaxMemory - Memory bytes available | IMPORTANT |
+
 ## Summary by category
 
 | Category | Count | Rounds |
 |----------|-------|--------|
-| Resource limits (CPU/memory/PIDs/swap) | 13 | 1, 4, 5, 6, 7, 8 |
+| Resource limits (CPU/memory/PIDs/swap) | 14 | 1, 4, 5, 6, 7, 8, 10 |
 | Namespace escape | 11 | 1, 5, 6, 8 |
-| Filesystem/bind mounts | 7 | 1, 2, 8 |
+| Filesystem/bind mounts | 8 | 1, 2, 8, 10 |
 | Ownership/isolation | 8 | 1, 3, 9 |
 | Capability/kernel | 5 | 1, 2 |
 | Request smuggling/injection | 4 | 2, 4 |
@@ -131,7 +138,7 @@ Established the core security model.
 | DoS vectors | 7 | 4, 5, 7, 9 |
 | Input validation | 3 | 5, 6, 7 |
 
-**Totals: 24 CRITICAL, 36 IMPORTANT, 7 LOW.**
+**Totals: 24 CRITICAL, 38 IMPORTANT, 7 LOW.**
 
 ## Recurring patterns
 

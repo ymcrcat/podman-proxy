@@ -1698,9 +1698,9 @@ func TestPerActionMethodEnforcement(t *testing.T) {
 }
 
 func TestCapMemorySwap(t *testing.T) {
-	p := &Policy{Workspace: "/workspace", MaxMemory: 1024, MaxCPUs: 2.0, MaxPids: 1024}
+	p := &Policy{Workspace: "/workspace", MaxMemory: 2048, MaxCPUs: 2.0, MaxPids: 1024}
 
-	// MemorySwap=-1 (unlimited) should be capped.
+	// MemorySwap=-1 (unlimited) with no Memory — both should be MaxMemory.
 	body := `{"Image":"alpine","HostConfig":{"MemorySwap":-1}}`
 	result, err := p.ValidateAndSanitize([]byte(body))
 	if err != nil {
@@ -1712,12 +1712,12 @@ func TestCapMemorySwap(t *testing.T) {
 	json.Unmarshal(raw["HostConfig"], &rawHC)
 	var swap int64
 	json.Unmarshal(rawHC["MemorySwap"], &swap)
-	if swap != 1024 {
-		t.Fatalf("expected MemorySwap capped to 1024, got %d", swap)
+	if swap != 2048 {
+		t.Fatalf("expected MemorySwap=MaxMemory=2048 when Memory omitted, got %d", swap)
 	}
 
-	// MemorySwap within limit should pass through.
-	body = `{"Image":"alpine","HostConfig":{"MemorySwap":512}}`
+	// Memory=512, MemorySwap should be set to 512 (disabling swap).
+	body = `{"Image":"alpine","HostConfig":{"Memory":512,"MemorySwap":9999}}`
 	result, err = p.ValidateAndSanitize([]byte(body))
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
@@ -1726,7 +1726,20 @@ func TestCapMemorySwap(t *testing.T) {
 	json.Unmarshal(raw["HostConfig"], &rawHC)
 	json.Unmarshal(rawHC["MemorySwap"], &swap)
 	if swap != 512 {
-		t.Fatalf("expected MemorySwap 512 (within limit), got %d", swap)
+		t.Fatalf("expected MemorySwap=Memory=512 (no swap), got %d", swap)
+	}
+
+	// Memory=1024, MemorySwap=-1 — swap should be tied to Memory, not MaxMemory.
+	body = `{"Image":"alpine","HostConfig":{"Memory":1024,"MemorySwap":-1}}`
+	result, err = p.ValidateAndSanitize([]byte(body))
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	json.Unmarshal(result, &raw)
+	json.Unmarshal(raw["HostConfig"], &rawHC)
+	json.Unmarshal(rawHC["MemorySwap"], &swap)
+	if swap != 1024 {
+		t.Fatalf("expected MemorySwap=1024 (tied to Memory, not MaxMemory), got %d", swap)
 	}
 }
 
@@ -2517,6 +2530,68 @@ func TestRenameBlockedBeforeForward(t *testing.T) {
 	}
 	if forwarded {
 		t.Fatal("invalid rename should NOT be forwarded to Podman")
+	}
+}
+
+func TestBlockImageMountType(t *testing.T) {
+	p := defaultPolicy()
+
+	// type=image should be blocked.
+	body := `{"Image":"alpine","HostConfig":{"Mounts":[{"Type":"image","Source":"ubuntu:latest","Target":"/mnt"}]}}`
+	_, err := p.ValidateAndSanitize([]byte(body))
+	if err == nil {
+		t.Fatal("type=image mount should be blocked")
+	}
+	if !strings.Contains(err.Error(), "not allowed") {
+		t.Fatalf("expected 'not allowed' error, got: %v", err)
+	}
+
+	// type=tmpfs should be allowed.
+	body = `{"Image":"alpine","HostConfig":{"Mounts":[{"Type":"tmpfs","Target":"/tmp"}]}}`
+	_, err = p.ValidateAndSanitize([]byte(body))
+	if err != nil {
+		t.Fatalf("tmpfs mount should be allowed, got error: %v", err)
+	}
+
+	// type=volume should be allowed.
+	body = `{"Image":"alpine","HostConfig":{"Mounts":[{"Type":"volume","Source":"mydata","Target":"/data"}]}}`
+	_, err = p.ValidateAndSanitize([]byte(body))
+	if err != nil {
+		t.Fatalf("volume mount should be allowed, got error: %v", err)
+	}
+
+	// Unknown type should be blocked.
+	body = `{"Image":"alpine","HostConfig":{"Mounts":[{"Type":"devpts","Target":"/dev/pts"}]}}`
+	_, err = p.ValidateAndSanitize([]byte(body))
+	if err == nil {
+		t.Fatal("unknown mount type should be blocked")
+	}
+}
+
+func TestSwapTiedToMemory(t *testing.T) {
+	p := &Policy{Workspace: "/workspace", MaxMemory: 2048, MaxCPUs: 2.0, MaxPids: 1024}
+
+	// Memory=512 — MemorySwap should be 512 (no swap), not MaxMemory.
+	body := `{"Image":"alpine","HostConfig":{"Memory":512}}`
+	result, err := p.ValidateAndSanitize([]byte(body))
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	var raw map[string]json.RawMessage
+	json.Unmarshal(result, &raw)
+	var rawHC map[string]json.RawMessage
+	json.Unmarshal(raw["HostConfig"], &rawHC)
+
+	var mem int64
+	json.Unmarshal(rawHC["Memory"], &mem)
+	var swap int64
+	json.Unmarshal(rawHC["MemorySwap"], &swap)
+
+	if mem != 512 {
+		t.Fatalf("Memory should be 512, got %d", mem)
+	}
+	if swap != 512 {
+		t.Fatalf("MemorySwap should equal Memory (512), not MaxMemory, got %d", swap)
 	}
 }
 
