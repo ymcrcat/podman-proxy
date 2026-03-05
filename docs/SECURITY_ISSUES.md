@@ -1,6 +1,6 @@
 # Security Issues Found
 
-63 issues found and fixed across 8 rounds of security review. All issues were found through automated code review and fixed with corresponding tests.
+67 issues found and fixed across 9 rounds of security review. All issues were found through automated code review and fixed with corresponding tests.
 
 ## Round 1 — 22 issues (foundational hardening)
 
@@ -107,6 +107,15 @@ Established the core security model.
 | 2 | Resources | Resource limits (Memory, CPU, PIDs) not applied when `HostConfig` absent or null — early return skipped all enforcement | CRITICAL |
 | 3 | Filesystem | `validateBinds` treated named volumes (`mydata:/data`) as bind mounts, incorrectly blocking them | IMPORTANT |
 
+## Round 9 — 4 issues
+
+| # | Category | Issue | Severity |
+|---|----------|-------|----------|
+| 1 | DoS | `limit` query param forwarded to Podman without bounds — host-wide container enumeration | IMPORTANT |
+| 2 | DoS | Streaming connections can hold all 20 semaphore slots for full WriteTimeout — sustained streaming DoS | IMPORTANT |
+| 3 | API surface | `ping`/`version` endpoints had no HTTP method restriction, passed through all query params and body | IMPORTANT |
+| 4 | Isolation | `rename` forwarded invalid name to Podman before validation — proxy/Podman ownership desync | IMPORTANT |
+
 ## Summary by category
 
 | Category | Count | Rounds |
@@ -114,15 +123,15 @@ Established the core security model.
 | Resource limits (CPU/memory/PIDs/swap) | 13 | 1, 4, 5, 6, 7, 8 |
 | Namespace escape | 11 | 1, 5, 6, 8 |
 | Filesystem/bind mounts | 7 | 1, 2, 8 |
-| Ownership/isolation | 7 | 1, 3 |
+| Ownership/isolation | 8 | 1, 3, 9 |
 | Capability/kernel | 5 | 1, 2 |
 | Request smuggling/injection | 4 | 2, 4 |
-| API surface/method control | 5 | 1, 4, 5 |
+| API surface/method control | 6 | 1, 4, 5, 9 |
 | Information leaks | 3 | 2, 4, 7 |
-| DoS vectors | 5 | 4, 5, 7 |
+| DoS vectors | 7 | 4, 5, 7, 9 |
 | Input validation | 3 | 5, 6, 7 |
 
-**Totals: 24 CRITICAL, 32 IMPORTANT, 7 LOW.**
+**Totals: 24 CRITICAL, 36 IMPORTANT, 7 LOW.**
 
 ## Recurring patterns
 

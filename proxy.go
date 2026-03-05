@@ -11,6 +11,7 @@ import (
 	"net/http"
 	"net/url"
 	"regexp"
+	"strconv"
 	"sync"
 	"time"
 )
@@ -102,9 +103,18 @@ func (p *Proxy) getTransport() *http.Transport {
 func (p *Proxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	path := r.URL.Path
 
-	// Always allow ping and version — harmless info endpoints.
+	// Allow ping and version — harmless read-only info endpoints.
+	// Restrict to GET/HEAD and strip query parameters.
 	if pingRe.MatchString(path) || versionRe.MatchString(path) {
-		p.forward(w, r, nil)
+		if r.Method != http.MethodGet && r.Method != http.MethodHead {
+			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+			return
+		}
+		stripped := *r
+		strippedURL := *r.URL
+		strippedURL.RawQuery = ""
+		stripped.URL = &strippedURL
+		p.forward(w, &stripped, nil)
 		return
 	}
 
@@ -201,6 +211,14 @@ func (p *Proxy) handleList(w http.ResponseWriter, r *http.Request) {
 			q.Del(k)
 		}
 	}
+	// Validate limit is a reasonable positive integer to prevent host-wide
+	// container enumeration DoS on Podman.
+	if limitStr := q.Get("limit"); limitStr != "" {
+		n, err := strconv.ParseInt(limitStr, 10, 64)
+		if err != nil || n <= 0 || n > 100 {
+			q.Del("limit")
+		}
+	}
 	listURL.RawQuery = q.Encode()
 	listReq.URL = &listURL
 
@@ -273,6 +291,16 @@ func (p *Proxy) handleContainerOp(w http.ResponseWriter, r *http.Request, versio
 		return
 	}
 
+	// Validate rename name before forwarding to prevent Podman/proxy ownership
+	// desync if Podman accepts a name the proxy's regex rejects.
+	if action == "rename" {
+		newName := r.URL.Query().Get("name")
+		if !containerNameRe.MatchString(newName) {
+			http.Error(w, "forbidden: invalid container name", http.StatusForbidden)
+			return
+		}
+	}
+
 	// Build rewritten path structurally from regex captures — never use
 	// string replacement, which can replace the wrong segment if the
 	// container name matches part of the version prefix or action.
@@ -317,13 +345,10 @@ func (p *Proxy) handleContainerOp(w http.ResponseWriter, r *http.Request, versio
 	}
 
 	// Update ownership table after successful rename.
+	// Name was already validated before forwarding.
 	if action == "rename" && resp.StatusCode >= 200 && resp.StatusCode < 300 {
 		newName := r.URL.Query().Get("name")
-		if containerNameRe.MatchString(newName) {
-			p.Ownership.Rename(fullID, newName)
-		} else {
-			log.Printf("[%s] WARNING: rename returned success but name %q fails validation, not tracking", p.AgentID, newName)
-		}
+		p.Ownership.Rename(fullID, newName)
 	}
 }
 
@@ -402,7 +427,6 @@ func (p *Proxy) streamForward(w http.ResponseWriter, r *http.Request) {
 	}
 
 	client := &http.Client{
-		// No timeout — streaming can run indefinitely until the client disconnects.
 		Transport: p.getTransport(),
 	}
 
@@ -417,8 +441,13 @@ func (p *Proxy) streamForward(w http.ResponseWriter, r *http.Request) {
 		bodyReader = bytes.NewReader(bodyData)
 	}
 
+	// Bound stream duration to prevent one tenant from holding semaphore
+	// slots indefinitely by stalling reads.
+	streamCtx, streamCancel := context.WithTimeout(r.Context(), 10*time.Minute)
+	defer streamCancel()
+
 	reqURL := "http://podman" + r.URL.RequestURI()
-	req, err := http.NewRequestWithContext(r.Context(), r.Method, reqURL, bodyReader)
+	req, err := http.NewRequestWithContext(streamCtx, r.Method, reqURL, bodyReader)
 	if err != nil {
 		http.Error(w, fmt.Sprintf("upstream error: %v", err), http.StatusBadGateway)
 		return

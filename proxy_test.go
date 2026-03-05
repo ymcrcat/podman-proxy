@@ -2378,6 +2378,148 @@ func TestNamedVolumesAllowed(t *testing.T) {
 	}
 }
 
+func TestListLimitValidation(t *testing.T) {
+	var receivedQuery string
+	podman := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if strings.Contains(r.URL.Path, "/containers/json") {
+			receivedQuery = r.URL.RawQuery
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusOK)
+			w.Write([]byte("[]"))
+			return
+		}
+		w.WriteHeader(http.StatusOK)
+	})
+
+	podmanSock, cleanup1 := mockPodman(t, podman)
+	defer cleanup1()
+
+	proxySock, cleanup2 := startProxy(t, podmanSock, defaultPolicy())
+	defer cleanup2()
+
+	client := unixClient(proxySock)
+
+	// Huge limit should be stripped.
+	resp, _ := client.Get("http://localhost/v4.0.0/containers/json?limit=9999999999")
+	resp.Body.Close()
+	if strings.Contains(receivedQuery, "limit") {
+		t.Fatalf("huge limit should be stripped, got query: %s", receivedQuery)
+	}
+
+	// Negative limit should be stripped.
+	resp, _ = client.Get("http://localhost/v4.0.0/containers/json?limit=-1")
+	resp.Body.Close()
+	if strings.Contains(receivedQuery, "limit") {
+		t.Fatalf("negative limit should be stripped, got query: %s", receivedQuery)
+	}
+
+	// Valid limit should pass through.
+	resp, _ = client.Get("http://localhost/v4.0.0/containers/json?limit=50")
+	resp.Body.Close()
+	if !strings.Contains(receivedQuery, "limit=50") {
+		t.Fatalf("valid limit should pass through, got query: %s", receivedQuery)
+	}
+}
+
+func TestPingVersionMethodRestriction(t *testing.T) {
+	podmanSock, cleanup := mockPodman(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+		w.Write([]byte("OK"))
+	}))
+	defer cleanup()
+
+	proxySock, pcleanup := startProxy(t, podmanSock, defaultPolicy())
+	defer pcleanup()
+
+	client := unixClient(proxySock)
+
+	// GET should work.
+	resp, _ := client.Get("http://localhost/v4.0.0/_ping")
+	resp.Body.Close()
+	if resp.StatusCode != 200 {
+		t.Fatalf("GET _ping: expected 200, got %d", resp.StatusCode)
+	}
+
+	// POST should be blocked.
+	resp, _ = client.Post("http://localhost/v4.0.0/_ping", "application/json", nil)
+	resp.Body.Close()
+	if resp.StatusCode != 405 {
+		t.Fatalf("POST _ping: expected 405, got %d", resp.StatusCode)
+	}
+
+	// GET version should work.
+	resp, _ = client.Get("http://localhost/v4.0.0/version")
+	resp.Body.Close()
+	if resp.StatusCode != 200 {
+		t.Fatalf("GET version: expected 200, got %d", resp.StatusCode)
+	}
+}
+
+func TestPingQueryParamsStripped(t *testing.T) {
+	var receivedQuery string
+	podmanSock, cleanup := mockPodman(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		receivedQuery = r.URL.RawQuery
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer cleanup()
+
+	proxySock, pcleanup := startProxy(t, podmanSock, defaultPolicy())
+	defer pcleanup()
+
+	client := unixClient(proxySock)
+
+	resp, _ := client.Get("http://localhost/v4.0.0/_ping?format=json&verbose=1")
+	resp.Body.Close()
+	if receivedQuery != "" {
+		t.Fatalf("ping query params should be stripped, got: %s", receivedQuery)
+	}
+}
+
+func TestRenameBlockedBeforeForward(t *testing.T) {
+	forwarded := false
+	podmanSock, cleanup := mockPodman(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if strings.Contains(r.URL.Path, "/rename") {
+			forwarded = true
+		}
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer cleanup()
+
+	const containerID = "abc123def456789012345678abc123def456789012345678abc123def4567890"
+	sockPath := testSockPath(t, "x")
+	proxy := &Proxy{
+		PodmanSocket: podmanSock,
+		Policy:       defaultPolicy(),
+		Ownership:    NewOwnership(),
+		AgentID:      "test",
+	}
+	listener, err := net.Listen("unix", sockPath)
+	if err != nil {
+		t.Fatalf("listen: %v", err)
+	}
+	server := &http.Server{Handler: proxy}
+	go server.Serve(listener)
+	defer func() { server.Close(); listener.Close() }()
+
+	proxy.Ownership.Add(containerID, "original")
+
+	client := unixClient(sockPath)
+
+	// Invalid name should be rejected before reaching Podman.
+	resp, _ := client.Post(
+		"http://localhost/v4.0.0/containers/"+containerID+"/rename?name=../evil",
+		"application/json",
+		nil,
+	)
+	resp.Body.Close()
+	if resp.StatusCode != 403 {
+		t.Fatalf("expected 403 for invalid rename name, got %d", resp.StatusCode)
+	}
+	if forwarded {
+		t.Fatal("invalid rename should NOT be forwarded to Podman")
+	}
+}
+
 func init() {
 	_ = os.Stderr
 }
