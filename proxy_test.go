@@ -3394,6 +3394,50 @@ func TestActionBodyDiscarded(t *testing.T) {
 	}
 }
 
+// --- Round 15 tests ---
+
+func TestStreamingActionBodyDiscarded(t *testing.T) {
+	cid := "7788990011223344556677889900112233445566778899001122334455667788"
+	var capturedBody []byte
+	podmanSock, cleanup := mockPodman(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		capturedBody, _ = io.ReadAll(r.Body)
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer cleanup()
+
+	sockPath := testSockPath(t, "x")
+	proxy := &Proxy{
+		PodmanSocket: podmanSock,
+		Policy:       defaultPolicy(),
+		Ownership:    NewOwnership(),
+		AgentID:      "test",
+		streamSem:    make(chan struct{}, maxConcurrentStream),
+	}
+	listener, err := net.Listen("unix", sockPath)
+	if err != nil {
+		t.Fatalf("listen: %v", err)
+	}
+	server := &http.Server{Handler: proxy}
+	go server.Serve(listener)
+	defer func() { server.Close(); listener.Close() }()
+	proxy.Ownership.Add(cid, "")
+	client := unixClient(sockPath)
+
+	// Send a body with wait (POST streaming action) — it should be discarded
+	resp, err := client.Post(
+		"http://localhost/v4.0.0/containers/"+cid+"/wait?condition=stopped",
+		"application/json",
+		strings.NewReader(`{"Condition":"running"}`),
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	resp.Body.Close()
+	if len(capturedBody) > 0 {
+		t.Fatalf("streaming action body should have been discarded, got %q", string(capturedBody))
+	}
+}
+
 func init() {
 	_ = os.Stderr
 }

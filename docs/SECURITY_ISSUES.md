@@ -1,6 +1,6 @@
 # Security Issues Found
 
-88 issues found and fixed across 14 rounds of security review. All issues were found through automated code review and fixed with corresponding tests.
+89 issues found and fixed across 15 rounds of security review. All issues were found through automated code review and fixed with corresponding tests.
 
 ## Round 1 — 22 issues (foundational hardening)
 
@@ -167,7 +167,7 @@ Established the core security model.
 | Information leaks | 3 | 2, 4, 7 |
 | DoS vectors | 8 | 4, 5, 7, 9, 11 |
 | Input validation | 8 | 5, 6, 7, 11, 12, 13 |
-| Policy bypass | 1 | 13 |
+| Policy bypass | 2 | 13, 15 |
 
 ## Round 14 — 5 issues
 
@@ -180,6 +180,14 @@ Established the core security model.
 | 5 | Policy bypass | Non-create action endpoints forward request body verbatim — body-based signal/param bypass | IMPORTANT |
 
 **Totals: 24 CRITICAL, 55 IMPORTANT, 9 LOW.**
+
+## Round 15 — 1 issue
+
+| # | Category | Issue | Severity |
+|---|----------|-------|----------|
+| 1 | Policy bypass | `streamForward` forwards request body for `wait` (POST streaming action) — violates body-discard invariant | IMPORTANT |
+
+**Totals: 24 CRITICAL, 56 IMPORTANT, 9 LOW.**
 
 ## Recurring patterns
 

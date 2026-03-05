@@ -428,9 +428,13 @@ func (p *Proxy) handleContainerOp(w http.ResponseWriter, r *http.Request, versio
 	isRemove := r.Method == http.MethodDelete ||
 		(r.Method == http.MethodPost && action == "remove")
 
-	// Streaming endpoints (logs, stats) are piped directly to avoid
-	// buffering unbounded output in memory.
+	// Streaming endpoints (logs, stats, wait) are piped directly to avoid
+	// buffering unbounded output in memory. Discard the request body —
+	// these endpoints use query params only, and forwarding bodies could
+	// bypass query param validation.
 	if streamingActions[action] {
+		rewritten.Body = http.NoBody
+		rewritten.ContentLength = 0
 		p.streamForward(w, &rewritten)
 		return
 	}
