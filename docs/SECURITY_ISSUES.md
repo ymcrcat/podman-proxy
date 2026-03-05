@@ -258,6 +258,12 @@ Comprehensive HostConfig field audit — every Docker/Podman compat API field re
 
 **Totals: 29 CRITICAL, 72 IMPORTANT, 18 LOW.**
 
+## Round 21 — 0 issues
+
+Final comprehensive review covering route matching, body handling, policy validation, query parameters, response handling, ownership tracking, and network controls. No new issues found. All pass-through fields reviewed and confirmed container-internal only (`Healthcheck`, `Labels`, `Env`, `Cmd`, `User`, `ReadonlyRootfs`, etc.).
+
+**Totals: 29 CRITICAL, 72 IMPORTANT, 18 LOW.**
+
 ## Recurring patterns
 
 Several issue patterns recurred across multiple rounds:
