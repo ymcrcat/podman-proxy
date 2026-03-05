@@ -12,6 +12,7 @@ import (
 	"net/url"
 	"regexp"
 	"strconv"
+	"strings"
 	"sync"
 	"time"
 )
@@ -55,6 +56,37 @@ var allowedActionMethods = map[string][]string{
 	"remove":  {http.MethodDelete, http.MethodPost},
 }
 
+// allowedActionParams defines the query parameters allowed per container action.
+// Any parameter not in this map is stripped before forwarding to Podman.
+// Actions not listed here have all query params stripped.
+var allowedActionParams = map[string]map[string]bool{
+	"":        {"force": true, "v": true},                        // inspect (GET, no params used) or delete (DELETE)
+	"start":   {},                                               // no params
+	"stop":    {"t": true},                                      // timeout (validated below)
+	"kill":    {"signal": true},                                 // validated below
+	"wait":    {"condition": true},                               // next-exit, not-running, removed, stopped
+	"logs":    {"follow": true, "stdout": true, "stderr": true, "since": true, "until": true, "timestamps": true, "tail": true},
+	"json":    {},                                               // inspect
+	"top":     {},                                               // strip ps_args
+	"stats":   {"stream": true},
+	"rename":  {"name": true},
+	"resize":  {"h": true, "w": true},
+	"pause":   {},
+	"unpause": {},
+	"remove":  {"force": true, "v": true},                       // strip depend
+}
+
+// allowedKillSignals is the set of signals allowed for the kill action.
+var allowedKillSignals = map[string]bool{
+	"SIGTERM": true, "TERM": true, "15": true,
+	"SIGKILL": true, "KILL": true, "9": true,
+	"SIGINT": true, "INT": true, "2": true,
+	"SIGQUIT": true, "QUIT": true, "3": true,
+	"SIGHUP": true, "HUP": true, "1": true,
+	"SIGUSR1": true, "USR1": true, "10": true,
+	"SIGUSR2": true, "USR2": true, "12": true,
+}
+
 // allowedResponseHeaders is the set of upstream headers forwarded to clients.
 // Everything else is stripped to avoid leaking infrastructure details.
 var allowedResponseHeaders = map[string]bool{
@@ -69,9 +101,12 @@ var allowedResponseHeaders = map[string]bool{
 
 // streamingActions are container actions that produce unbounded streaming output.
 // These are piped directly to the client instead of being buffered in memory.
+// "wait" is included because it blocks until the container exits, which can be
+// indefinitely — without the semaphore it would allow goroutine exhaustion DoS.
 var streamingActions = map[string]bool{
 	"logs":  true,
 	"stats": true,
+	"wait":  true,
 }
 
 // Proxy is the HTTP handler that enforces policy and forwards to podman.
@@ -301,6 +336,31 @@ func (p *Proxy) handleContainerOp(w http.ResponseWriter, r *http.Request, versio
 		}
 	}
 
+	// Sanitize query parameters: only forward params allowed for this action.
+	sanitizedQuery := url.Values{}
+	if allowed, ok := allowedActionParams[action]; ok {
+		for k, vv := range r.URL.Query() {
+			if allowed[k] {
+				sanitizedQuery[k] = vv
+			}
+		}
+	}
+	// Validate specific dangerous params.
+	if action == "stop" {
+		if tStr := sanitizedQuery.Get("t"); tStr != "" {
+			t, err := strconv.ParseInt(tStr, 10, 64)
+			if err != nil || t < 0 || t > 300 {
+				sanitizedQuery.Del("t")
+			}
+		}
+	}
+	if action == "kill" {
+		sig := strings.ToUpper(sanitizedQuery.Get("signal"))
+		if sig != "" && !allowedKillSignals[sig] {
+			sanitizedQuery.Del("signal")
+		}
+	}
+
 	// Build rewritten path structurally from regex captures — never use
 	// string replacement, which can replace the wrong segment if the
 	// container name matches part of the version prefix or action.
@@ -311,6 +371,7 @@ func (p *Proxy) handleContainerOp(w http.ResponseWriter, r *http.Request, versio
 	rewrittenURL := *r.URL
 	rewrittenURL.Path = newPath
 	rewrittenURL.RawPath = "" // force use of Path
+	rewrittenURL.RawQuery = sanitizedQuery.Encode()
 	rewritten := *r
 	rewritten.URL = &rewrittenURL
 

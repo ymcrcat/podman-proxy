@@ -190,6 +190,11 @@ func (p *Policy) ValidateAndSanitize(body []byte) ([]byte, error) {
 	// bypassing workspace bind-mount restrictions.
 	delete(rawHC, "VolumesFrom")
 
+	// Strip OomKillDisable — on cgroups v1, disabling the OOM killer causes
+	// the kernel to kill arbitrary host processes when the container exhausts
+	// its memory limit.
+	delete(rawHC, "OomKillDisable")
+
 	// Cap memory. Always enforce when MaxMemory is configured (Memory=0 means
 	// unlimited in Podman, which would bypass the limit).
 	effectiveMemory := hc.Memory

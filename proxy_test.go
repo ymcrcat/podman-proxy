@@ -2595,6 +2595,280 @@ func TestSwapTiedToMemory(t *testing.T) {
 	}
 }
 
+// --- Round 11 tests ---
+
+func TestWaitUsesStreamingSemaphore(t *testing.T) {
+	// wait should be in streamingActions, not doForward
+	if !streamingActions["wait"] {
+		t.Fatal("wait should be in streamingActions")
+	}
+}
+
+func TestStripOomKillDisable(t *testing.T) {
+	p := defaultPolicy()
+	body := `{"Image":"alpine","HostConfig":{"OomKillDisable":true}}`
+	result, err := p.ValidateAndSanitize([]byte(body))
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	var raw map[string]json.RawMessage
+	json.Unmarshal(result, &raw)
+	var rawHC map[string]json.RawMessage
+	json.Unmarshal(raw["HostConfig"], &rawHC)
+	if _, ok := rawHC["OomKillDisable"]; ok {
+		t.Fatal("OomKillDisable should have been stripped")
+	}
+}
+
+// makeProxyWithOwnership creates a proxy with a pre-registered container for testing
+// query parameter sanitization. Returns the proxy socket path, client, and cleanup func.
+func makeProxyWithOwnership(t *testing.T, cid string) (*http.Client, string) {
+	t.Helper()
+	podmanSock, cleanup := mockPodman(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		// Store query for the test to inspect via the captured variable
+		w.WriteHeader(http.StatusOK)
+	}))
+	t.Cleanup(cleanup)
+
+	sockPath := testSockPath(t, "x")
+	proxy := &Proxy{
+		PodmanSocket: podmanSock,
+		Policy:       defaultPolicy(),
+		Ownership:    NewOwnership(),
+		AgentID:      "test",
+	}
+	listener, err := net.Listen("unix", sockPath)
+	if err != nil {
+		t.Fatalf("listen: %v", err)
+	}
+	server := &http.Server{Handler: proxy}
+	go server.Serve(listener)
+	t.Cleanup(func() { server.Close(); listener.Close() })
+
+	proxy.Ownership.Add(cid, "")
+	return unixClient(sockPath), sockPath
+}
+
+func TestContainerOpQueryParamSanitization(t *testing.T) {
+	cid := "aa11bb22cc33dd44ee55ff66aa11bb22cc33dd44ee55ff66aa11bb22cc33dd44"
+	var capturedQuery string
+	podmanSock, cleanup := mockPodman(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		capturedQuery = r.URL.RawQuery
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer cleanup()
+
+	sockPath := testSockPath(t, "x")
+	proxy := &Proxy{
+		PodmanSocket: podmanSock,
+		Policy:       defaultPolicy(),
+		Ownership:    NewOwnership(),
+		AgentID:      "test",
+	}
+	listener, err := net.Listen("unix", sockPath)
+	if err != nil {
+		t.Fatalf("listen: %v", err)
+	}
+	server := &http.Server{Handler: proxy}
+	go server.Serve(listener)
+	defer func() { server.Close(); listener.Close() }()
+	proxy.Ownership.Add(cid, "")
+	client := unixClient(sockPath)
+
+	// stop with valid t=5 should pass through, but extra params should be stripped
+	resp, err := client.Post(
+		"http://localhost/v4.0.0/containers/"+cid+"/stop?t=5&extra=bad",
+		"", nil,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	resp.Body.Close()
+	if resp.StatusCode != 200 {
+		t.Fatalf("expected 200, got %d", resp.StatusCode)
+	}
+	if !strings.Contains(capturedQuery, "t=5") {
+		t.Fatalf("expected t=5 in query, got %q", capturedQuery)
+	}
+	if strings.Contains(capturedQuery, "extra") {
+		t.Fatalf("extra param should have been stripped, got %q", capturedQuery)
+	}
+}
+
+func TestStopNegativeTimeoutStripped(t *testing.T) {
+	cid := "bb22cc33dd44ee55ff66aa11bb22cc33dd44ee55ff66aa11bb22cc33dd44ee55"
+	var capturedQuery string
+	podmanSock, cleanup := mockPodman(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		capturedQuery = r.URL.RawQuery
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer cleanup()
+
+	sockPath := testSockPath(t, "x")
+	proxy := &Proxy{
+		PodmanSocket: podmanSock,
+		Policy:       defaultPolicy(),
+		Ownership:    NewOwnership(),
+		AgentID:      "test",
+	}
+	listener, err := net.Listen("unix", sockPath)
+	if err != nil {
+		t.Fatalf("listen: %v", err)
+	}
+	server := &http.Server{Handler: proxy}
+	go server.Serve(listener)
+	defer func() { server.Close(); listener.Close() }()
+	proxy.Ownership.Add(cid, "")
+	client := unixClient(sockPath)
+
+	// t=-1 should be stripped (negative = wait indefinitely)
+	resp, err := client.Post(
+		"http://localhost/v4.0.0/containers/"+cid+"/stop?t=-1",
+		"", nil,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	resp.Body.Close()
+	if strings.Contains(capturedQuery, "t=") {
+		t.Fatalf("negative t should have been stripped, got %q", capturedQuery)
+	}
+}
+
+func TestKillDangerousSignalStripped(t *testing.T) {
+	cid := "cc33dd44ee55ff66aa11bb22cc33dd44ee55ff66aa11bb22cc33dd44ee55ff66"
+	var capturedQuery string
+	podmanSock, cleanup := mockPodman(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		capturedQuery = r.URL.RawQuery
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer cleanup()
+
+	sockPath := testSockPath(t, "x")
+	proxy := &Proxy{
+		PodmanSocket: podmanSock,
+		Policy:       defaultPolicy(),
+		Ownership:    NewOwnership(),
+		AgentID:      "test",
+	}
+	listener, err := net.Listen("unix", sockPath)
+	if err != nil {
+		t.Fatalf("listen: %v", err)
+	}
+	server := &http.Server{Handler: proxy}
+	go server.Serve(listener)
+	defer func() { server.Close(); listener.Close() }()
+	proxy.Ownership.Add(cid, "")
+	client := unixClient(sockPath)
+
+	// SIGTERM should pass through
+	resp, err := client.Post(
+		"http://localhost/v4.0.0/containers/"+cid+"/kill?signal=SIGTERM",
+		"", nil,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	resp.Body.Close()
+	if !strings.Contains(capturedQuery, "signal=SIGTERM") {
+		t.Fatalf("SIGTERM should pass through, got %q", capturedQuery)
+	}
+
+	// SIGSEGV should be stripped
+	resp, err = client.Post(
+		"http://localhost/v4.0.0/containers/"+cid+"/kill?signal=SIGSEGV",
+		"", nil,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	resp.Body.Close()
+	if strings.Contains(capturedQuery, "signal") {
+		t.Fatalf("SIGSEGV should have been stripped, got %q", capturedQuery)
+	}
+}
+
+func TestDeleteDependParamStripped(t *testing.T) {
+	cid := "dd44ee55ff66aa11bb22cc33dd44ee55ff66aa11bb22cc33dd44ee55ff66aa11"
+	var capturedQuery string
+	podmanSock, cleanup := mockPodman(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		capturedQuery = r.URL.RawQuery
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer cleanup()
+
+	sockPath := testSockPath(t, "x")
+	proxy := &Proxy{
+		PodmanSocket: podmanSock,
+		Policy:       defaultPolicy(),
+		Ownership:    NewOwnership(),
+		AgentID:      "test",
+	}
+	listener, err := net.Listen("unix", sockPath)
+	if err != nil {
+		t.Fatalf("listen: %v", err)
+	}
+	server := &http.Server{Handler: proxy}
+	go server.Serve(listener)
+	defer func() { server.Close(); listener.Close() }()
+	proxy.Ownership.Add(cid, "")
+	client := unixClient(sockPath)
+
+	req, _ := http.NewRequest(http.MethodDelete,
+		"http://localhost/v4.0.0/containers/"+cid+"?force=true&v=true&depend=true",
+		nil,
+	)
+	resp, err := client.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	resp.Body.Close()
+	if strings.Contains(capturedQuery, "depend") {
+		t.Fatalf("depend param should have been stripped, got %q", capturedQuery)
+	}
+	if !strings.Contains(capturedQuery, "force=true") {
+		t.Fatalf("force should pass through, got %q", capturedQuery)
+	}
+}
+
+func TestTopPsArgsStripped(t *testing.T) {
+	cid := "ee55ff66aa11bb22cc33dd44ee55ff66aa11bb22cc33dd44ee55ff66aa11bb22"
+	var capturedQuery string
+	podmanSock, cleanup := mockPodman(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		capturedQuery = r.URL.RawQuery
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer cleanup()
+
+	sockPath := testSockPath(t, "x")
+	proxy := &Proxy{
+		PodmanSocket: podmanSock,
+		Policy:       defaultPolicy(),
+		Ownership:    NewOwnership(),
+		AgentID:      "test",
+	}
+	listener, err := net.Listen("unix", sockPath)
+	if err != nil {
+		t.Fatalf("listen: %v", err)
+	}
+	server := &http.Server{Handler: proxy}
+	go server.Serve(listener)
+	defer func() { server.Close(); listener.Close() }()
+	proxy.Ownership.Add(cid, "")
+	client := unixClient(sockPath)
+
+	resp, err := client.Get(
+		"http://localhost/v4.0.0/containers/" + cid + "/top?ps_args=-eo%20pid,user",
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	resp.Body.Close()
+	if strings.Contains(capturedQuery, "ps_args") {
+		t.Fatalf("ps_args should have been stripped, got %q", capturedQuery)
+	}
+}
+
 func init() {
 	_ = os.Stderr
 }

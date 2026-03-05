@@ -1,6 +1,6 @@
 # Security Issues Found
 
-69 issues found and fixed across 10 rounds of security review. All issues were found through automated code review and fixed with corresponding tests.
+72 issues found and fixed across 11 rounds of security review. All issues were found through automated code review and fixed with corresponding tests.
 
 ## Round 1 — 22 issues (foundational hardening)
 
@@ -123,6 +123,14 @@ Established the core security model.
 | 1 | Filesystem | `type=image` mounts bypass image allowlist — `validateMounts` only checked `bind` type | IMPORTANT |
 | 2 | Resources | `MemorySwap` cap did not disable swap when `Memory < MaxMemory` — swap = MaxMemory - Memory bytes available | IMPORTANT |
 
+## Round 11 — 3 issues
+
+| # | Category | Issue | Severity |
+|---|----------|-------|----------|
+| 1 | DoS | `wait` action not protected by streaming semaphore — goroutine exhaustion via concurrent blocking calls | IMPORTANT |
+| 2 | Policy bypass | `OomKillDisable` passed through unsanitized — on cgroups v1, disables OOM killer causing host-wide kills | IMPORTANT |
+| 3 | Input validation | Query parameters forwarded unsanitized for container operations — `stop?t=-1`, `kill?signal=SIGSEGV`, `delete?depend=true`, `top?ps_args=` | IMPORTANT |
+
 ## Summary by category
 
 | Category | Count | Rounds |
@@ -131,14 +139,14 @@ Established the core security model.
 | Namespace escape | 11 | 1, 5, 6, 8 |
 | Filesystem/bind mounts | 8 | 1, 2, 8, 10 |
 | Ownership/isolation | 8 | 1, 3, 9 |
-| Capability/kernel | 5 | 1, 2 |
+| Capability/kernel | 6 | 1, 2, 11 |
 | Request smuggling/injection | 4 | 2, 4 |
 | API surface/method control | 6 | 1, 4, 5, 9 |
 | Information leaks | 3 | 2, 4, 7 |
-| DoS vectors | 7 | 4, 5, 7, 9 |
-| Input validation | 3 | 5, 6, 7 |
+| DoS vectors | 8 | 4, 5, 7, 9, 11 |
+| Input validation | 4 | 5, 6, 7, 11 |
 
-**Totals: 24 CRITICAL, 38 IMPORTANT, 7 LOW.**
+**Totals: 24 CRITICAL, 41 IMPORTANT, 7 LOW.**
 
 ## Recurring patterns
 
