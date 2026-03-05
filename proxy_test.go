@@ -16,9 +16,6 @@ import (
 
 var sockCounter atomic.Int64
 
-// testSockPath returns a short socket path to avoid unix socket path length limits
-// and sandbox restrictions on t.TempDir().
-// sockDir can be overridden via SOCK_DIR env var for sandbox environments.
 func testSockPath(t *testing.T, suffix string) string {
 	t.Helper()
 	n := sockCounter.Add(1)
@@ -32,8 +29,6 @@ func testSockPath(t *testing.T, suffix string) string {
 	return path
 }
 
-// mockPodman starts a mock podman API server on a unix socket.
-// It returns the socket path and a cleanup function.
 func mockPodman(t *testing.T, handler http.Handler) (string, func()) {
 	t.Helper()
 	sockPath := testSockPath(t, "p")
@@ -49,7 +44,6 @@ func mockPodman(t *testing.T, handler http.Handler) (string, func()) {
 	}
 }
 
-// startProxy starts the proxy on a unix socket talking to a mock podman.
 func startProxy(t *testing.T, podmanSock string, policy *Policy) (string, func()) {
 	t.Helper()
 	sockPath := testSockPath(t, "x")
@@ -95,11 +89,8 @@ func TestBlockPrivileged(t *testing.T) {
 	p := defaultPolicy()
 	body := `{"Image":"alpine","HostConfig":{"Privileged":true}}`
 	_, err := p.ValidateAndSanitize([]byte(body))
-	if err == nil {
-		t.Fatal("expected error for privileged container")
-	}
-	if !strings.Contains(err.Error(), "privileged") {
-		t.Fatalf("unexpected error: %v", err)
+	if err == nil || !strings.Contains(err.Error(), "privileged") {
+		t.Fatalf("expected privileged error, got: %v", err)
 	}
 }
 
@@ -121,6 +112,42 @@ func TestBlockHostPid(t *testing.T) {
 	}
 }
 
+func TestBlockHostIpc(t *testing.T) {
+	p := defaultPolicy()
+	body := `{"Image":"alpine","HostConfig":{"IpcMode":"host"}}`
+	_, err := p.ValidateAndSanitize([]byte(body))
+	if err == nil {
+		t.Fatal("expected error for host IPC")
+	}
+}
+
+func TestBlockHostUTS(t *testing.T) {
+	p := defaultPolicy()
+	body := `{"Image":"alpine","HostConfig":{"UTSMode":"host"}}`
+	_, err := p.ValidateAndSanitize([]byte(body))
+	if err == nil {
+		t.Fatal("expected error for host UTS")
+	}
+}
+
+func TestBlockHostUserns(t *testing.T) {
+	p := defaultPolicy()
+	body := `{"Image":"alpine","HostConfig":{"UsernsMode":"host"}}`
+	_, err := p.ValidateAndSanitize([]byte(body))
+	if err == nil {
+		t.Fatal("expected error for host user namespace")
+	}
+}
+
+func TestBlockHostCgroupns(t *testing.T) {
+	p := defaultPolicy()
+	body := `{"Image":"alpine","HostConfig":{"CgroupnsMode":"host"}}`
+	_, err := p.ValidateAndSanitize([]byte(body))
+	if err == nil {
+		t.Fatal("expected error for host cgroup namespace")
+	}
+}
+
 func TestBlockBindOutsideWorkspace(t *testing.T) {
 	p := defaultPolicy()
 	body := `{"Image":"alpine","HostConfig":{"Binds":["/etc/passwd:/mnt/passwd"]}}`
@@ -130,8 +157,45 @@ func TestBlockBindOutsideWorkspace(t *testing.T) {
 	}
 }
 
+func TestBlockEmptyBindHostPath(t *testing.T) {
+	p := defaultPolicy()
+	body := `{"Image":"alpine","HostConfig":{"Binds":[":/container"]}}`
+	_, err := p.ValidateAndSanitize([]byte(body))
+	if err == nil {
+		t.Fatal("expected error for empty host path")
+	}
+}
+
+func TestBlockMountsOutsideWorkspace(t *testing.T) {
+	p := defaultPolicy()
+	body := `{"Image":"alpine","HostConfig":{"Mounts":[{"Type":"bind","Source":"/etc","Target":"/mnt"}]}}`
+	_, err := p.ValidateAndSanitize([]byte(body))
+	if err == nil {
+		t.Fatal("expected error for Mounts bind outside workspace")
+	}
+}
+
+func TestAllowMountsInsideWorkspace(t *testing.T) {
+	ws := t.TempDir()
+	p := &Policy{Workspace: ws, MaxMemory: 2e9, MaxCPUs: 2.0}
+	body := `{"Image":"alpine","HostConfig":{"Mounts":[{"Type":"bind","Source":"` + ws + `/data","Target":"/mnt"}]}}`
+	_, err := p.ValidateAndSanitize([]byte(body))
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+}
+
+func TestAllowMountsVolume(t *testing.T) {
+	p := defaultPolicy()
+	// Volume-type mounts don't reference host paths, should be allowed.
+	body := `{"Image":"alpine","HostConfig":{"Mounts":[{"Type":"volume","Source":"myvolume","Target":"/data"}]}}`
+	_, err := p.ValidateAndSanitize([]byte(body))
+	if err != nil {
+		t.Fatalf("volume mount should be allowed: %v", err)
+	}
+}
+
 func TestAllowBindInsideWorkspace(t *testing.T) {
-	// Use a temp dir as workspace that actually exists.
 	ws := t.TempDir()
 	p := &Policy{Workspace: ws, MaxMemory: 2e9, MaxCPUs: 2.0}
 	body := `{"Image":"alpine","HostConfig":{"Binds":["` + ws + `/data:/data"]}}`
@@ -141,17 +205,24 @@ func TestAllowBindInsideWorkspace(t *testing.T) {
 	}
 }
 
+func TestEmptyWorkspaceBlocksAllBinds(t *testing.T) {
+	p := &Policy{Workspace: "", MaxMemory: 2e9, MaxCPUs: 2.0}
+	body := `{"Image":"alpine","HostConfig":{"Binds":["/tmp/safe:/data"]}}`
+	_, err := p.ValidateAndSanitize([]byte(body))
+	if err == nil {
+		t.Fatal("expected error when workspace is empty")
+	}
+}
+
 func TestImageAllowlist(t *testing.T) {
 	p := &Policy{
 		Workspace:     "/workspace",
 		AllowedImages: []string{"alpine", "ubuntu:22.04"},
 	}
-	// Allowed.
 	_, err := p.ValidateAndSanitize([]byte(`{"Image":"alpine"}`))
 	if err != nil {
 		t.Fatalf("alpine should be allowed: %v", err)
 	}
-	// Blocked.
 	_, err = p.ValidateAndSanitize([]byte(`{"Image":"evil:latest"}`))
 	if err == nil {
 		t.Fatal("expected error for disallowed image")
@@ -165,14 +236,14 @@ func TestStripDangerousCaps(t *testing.T) {
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
-	var parsed struct {
-		HostConfig struct {
-			CapAdd []string `json:"CapAdd"`
-		} `json:"HostConfig"`
-	}
-	json.Unmarshal(result, &parsed)
-	if len(parsed.HostConfig.CapAdd) != 1 || parsed.HostConfig.CapAdd[0] != "NET_BIND_SERVICE" {
-		t.Fatalf("expected only NET_BIND_SERVICE, got %v", parsed.HostConfig.CapAdd)
+	var raw map[string]json.RawMessage
+	json.Unmarshal(result, &raw)
+	var rawHC map[string]json.RawMessage
+	json.Unmarshal(raw["HostConfig"], &rawHC)
+	var caps []string
+	json.Unmarshal(rawHC["CapAdd"], &caps)
+	if len(caps) != 1 || caps[0] != "NET_BIND_SERVICE" {
+		t.Fatalf("expected only NET_BIND_SERVICE, got %v", caps)
 	}
 }
 
@@ -183,14 +254,44 @@ func TestStripDevices(t *testing.T) {
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
-	var parsed struct {
-		HostConfig struct {
-			Devices []interface{} `json:"Devices"`
-		} `json:"HostConfig"`
+	var raw map[string]json.RawMessage
+	json.Unmarshal(result, &raw)
+	var rawHC map[string]json.RawMessage
+	json.Unmarshal(raw["HostConfig"], &rawHC)
+	if _, ok := rawHC["Devices"]; ok {
+		t.Fatal("expected Devices to be removed")
 	}
-	json.Unmarshal(result, &parsed)
-	if len(parsed.HostConfig.Devices) != 0 {
-		t.Fatalf("expected devices to be stripped, got %v", parsed.HostConfig.Devices)
+}
+
+func TestStripSecurityOpt(t *testing.T) {
+	p := defaultPolicy()
+	body := `{"Image":"alpine","HostConfig":{"SecurityOpt":["seccomp=unconfined"]}}`
+	result, err := p.ValidateAndSanitize([]byte(body))
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	var raw map[string]json.RawMessage
+	json.Unmarshal(result, &raw)
+	var rawHC map[string]json.RawMessage
+	json.Unmarshal(raw["HostConfig"], &rawHC)
+	if _, ok := rawHC["SecurityOpt"]; ok {
+		t.Fatal("expected SecurityOpt to be removed")
+	}
+}
+
+func TestStripSysctls(t *testing.T) {
+	p := defaultPolicy()
+	body := `{"Image":"alpine","HostConfig":{"Sysctls":{"net.ipv4.ip_forward":"1"}}}`
+	result, err := p.ValidateAndSanitize([]byte(body))
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	var raw map[string]json.RawMessage
+	json.Unmarshal(result, &raw)
+	var rawHC map[string]json.RawMessage
+	json.Unmarshal(raw["HostConfig"], &rawHC)
+	if _, ok := rawHC["Sysctls"]; ok {
+		t.Fatal("expected Sysctls to be removed")
 	}
 }
 
@@ -201,14 +302,14 @@ func TestCapMemory(t *testing.T) {
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
-	var parsed struct {
-		HostConfig struct {
-			Memory int64 `json:"Memory"`
-		} `json:"HostConfig"`
-	}
-	json.Unmarshal(result, &parsed)
-	if parsed.HostConfig.Memory != 1024 {
-		t.Fatalf("expected memory capped to 1024, got %d", parsed.HostConfig.Memory)
+	var raw map[string]json.RawMessage
+	json.Unmarshal(result, &raw)
+	var rawHC map[string]json.RawMessage
+	json.Unmarshal(raw["HostConfig"], &rawHC)
+	var mem int64
+	json.Unmarshal(rawHC["Memory"], &mem)
+	if mem != 1024 {
+		t.Fatalf("expected memory capped to 1024, got %d", mem)
 	}
 }
 
@@ -219,14 +320,14 @@ func TestCapNanoCpus(t *testing.T) {
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
-	var parsed struct {
-		HostConfig struct {
-			NanoCpus int64 `json:"NanoCpus"`
-		} `json:"HostConfig"`
-	}
-	json.Unmarshal(result, &parsed)
-	if parsed.HostConfig.NanoCpus != 1e9 {
-		t.Fatalf("expected NanoCpus capped to 1e9, got %d", parsed.HostConfig.NanoCpus)
+	var raw map[string]json.RawMessage
+	json.Unmarshal(result, &raw)
+	var rawHC map[string]json.RawMessage
+	json.Unmarshal(raw["HostConfig"], &rawHC)
+	var nano int64
+	json.Unmarshal(rawHC["NanoCpus"], &nano)
+	if nano != 1e9 {
+		t.Fatalf("expected NanoCpus capped to 1e9, got %d", nano)
 	}
 }
 
@@ -237,7 +338,6 @@ func TestPassthroughUnchangedFields(t *testing.T) {
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
-	// Ensure fields pass through.
 	var parsed map[string]interface{}
 	json.Unmarshal(result, &parsed)
 	if parsed["Image"] != "alpine" {
@@ -249,37 +349,132 @@ func TestPassthroughUnchangedFields(t *testing.T) {
 	}
 }
 
+func TestAlwaysRemarshal(t *testing.T) {
+	p := defaultPolicy()
+	// Body with no HostConfig modifications needed — should still re-marshal.
+	body := `{"Image":"alpine","HostConfig":{"NetworkMode":"bridge"}}`
+	result, err := p.ValidateAndSanitize([]byte(body))
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	// Verify it's valid JSON that round-trips.
+	var parsed map[string]json.RawMessage
+	if err := json.Unmarshal(result, &parsed); err != nil {
+		t.Fatalf("re-marshaled body is invalid JSON: %v", err)
+	}
+}
+
+func TestPreservesUnknownHostConfigFields(t *testing.T) {
+	p := defaultPolicy()
+	// PortBindings is not in our hostConfig struct — it should be preserved.
+	body := `{"Image":"alpine","HostConfig":{"NetworkMode":"bridge","PortBindings":{"80/tcp":[{"HostPort":"8080"}]}}}`
+	result, err := p.ValidateAndSanitize([]byte(body))
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	var raw map[string]json.RawMessage
+	json.Unmarshal(result, &raw)
+	var rawHC map[string]json.RawMessage
+	json.Unmarshal(raw["HostConfig"], &rawHC)
+	if _, ok := rawHC["PortBindings"]; !ok {
+		t.Fatal("PortBindings was lost during re-marshal")
+	}
+}
+
 // --- Ownership tests ---
 
-func TestOwnershipPrefixMatch(t *testing.T) {
+func TestOwnershipExactMatch(t *testing.T) {
 	o := NewOwnership()
-	o.Add("abc123def456")
-	if !o.Owns("abc123def456") {
+	o.Add("abc123def456abcdef")
+	if !o.Owns("abc123def456abcdef") {
 		t.Fatal("exact match failed")
 	}
-	if !o.Owns("abc123") {
-		t.Fatal("prefix match failed")
+}
+
+func TestOwnershipPrefixRequiresMinLength(t *testing.T) {
+	o := NewOwnership()
+	o.Add("abc123def456abcdef")
+	// Short prefix (< 12 chars) should NOT match.
+	if o.Owns("abc") {
+		t.Fatal("short prefix should not match")
 	}
-	if o.Owns("xyz") {
-		t.Fatal("non-owned matched")
+	if o.Owns("abc123") {
+		t.Fatal("6-char prefix should not match")
+	}
+	// 12+ char prefix should match.
+	if !o.Owns("abc123def456") {
+		t.Fatal("12-char prefix should match")
+	}
+}
+
+func TestOwnershipNameMatch(t *testing.T) {
+	o := NewOwnership()
+	o.Add("abc123def456abcdef")
+	o.SetName("abc123def456abcdef", "my-container")
+	if !o.Owns("my-container") {
+		t.Fatal("name match failed")
+	}
+	if o.Owns("other-container") {
+		t.Fatal("non-owned name matched")
+	}
+}
+
+func TestOwnershipRemoveCleansName(t *testing.T) {
+	o := NewOwnership()
+	o.Add("abc123def456abcdef")
+	o.SetName("abc123def456abcdef", "my-container")
+	o.Remove("abc123def456abcdef")
+	if o.Owns("my-container") {
+		t.Fatal("name should be cleaned up after Remove")
+	}
+	if o.Owns("abc123def456abcdef") {
+		t.Fatal("ID should be removed")
+	}
+}
+
+func TestOwnershipFullID(t *testing.T) {
+	o := NewOwnership()
+	o.Add("abc123def456abcdef")
+	o.SetName("abc123def456abcdef", "my-container")
+
+	if o.FullID("abc123def456abcdef") != "abc123def456abcdef" {
+		t.Fatal("FullID exact match failed")
+	}
+	if o.FullID("my-container") != "abc123def456abcdef" {
+		t.Fatal("FullID name lookup failed")
+	}
+	if o.FullID("abc123def456") != "abc123def456abcdef" {
+		t.Fatal("FullID prefix lookup failed")
+	}
+	if o.FullID("xyz") != "" {
+		t.Fatal("FullID should return empty for unknown ref")
+	}
+}
+
+func TestPolicyValidateBindsTraversal(t *testing.T) {
+	ws := t.TempDir()
+	p := &Policy{Workspace: ws}
+	body := `{"Image":"alpine","HostConfig":{"Binds":["` + ws + `/../etc/passwd:/mnt"]}}`
+	_, err := p.ValidateAndSanitize([]byte(body))
+	if err == nil {
+		t.Fatal("expected error for path traversal")
 	}
 }
 
 // --- End-to-end proxy tests ---
 
 func TestProxyCreateAndList(t *testing.T) {
-	// Mock podman: accepts creates, returns container list.
 	podman := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if strings.Contains(r.URL.Path, "/containers/create") {
-			id := "abc123def456789"
+			id := "abc123def456789012345678"
 			w.WriteHeader(http.StatusCreated)
 			json.NewEncoder(w).Encode(map[string]string{"Id": id})
 			return
 		}
 		if strings.Contains(r.URL.Path, "/containers/json") {
 			containers := []map[string]interface{}{
-				{"Id": "abc123def456789", "Names": []string{"/my-container"}},
-				{"Id": "other999888777", "Names": []string{"/not-mine"}},
+				{"Id": "abc123def456789012345678", "Names": []string{"/my-container"}},
+				{"Id": "other999888777666555444", "Names": []string{"/not-mine"}},
 			}
 			w.WriteHeader(http.StatusOK)
 			json.NewEncoder(w).Encode(containers)
@@ -296,7 +491,6 @@ func TestProxyCreateAndList(t *testing.T) {
 
 	client := unixClient(proxySock)
 
-	// Create a container.
 	resp, err := client.Post(
 		"http://localhost/v4.0.0/containers/create",
 		"application/json",
@@ -322,7 +516,7 @@ func TestProxyCreateAndList(t *testing.T) {
 	if len(listed) != 1 {
 		t.Fatalf("expected 1 container in list, got %d", len(listed))
 	}
-	if listed[0]["Id"] != "abc123def456789" {
+	if listed[0]["Id"] != "abc123def456789012345678" {
 		t.Fatalf("unexpected container in list: %v", listed[0]["Id"])
 	}
 }
@@ -365,7 +559,7 @@ func TestProxyBlocksUnownedContainer(t *testing.T) {
 	defer cleanup2()
 
 	client := unixClient(proxySock)
-	resp, err := client.Post("http://localhost/v4.0.0/containers/unknown123/start", "", nil)
+	resp, err := client.Post("http://localhost/v4.0.0/containers/unknown123456/start", "", nil)
 	if err != nil {
 		t.Fatalf("request: %v", err)
 	}
@@ -406,6 +600,68 @@ func TestProxyBlocksForbiddenEndpoints(t *testing.T) {
 	}
 }
 
+func TestProxyBlocksExecAndUpdate(t *testing.T) {
+	containerID := "abc123def456789012345678"
+	podman := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if strings.Contains(r.URL.Path, "/containers/create") {
+			w.WriteHeader(http.StatusCreated)
+			json.NewEncoder(w).Encode(map[string]string{"Id": containerID})
+			return
+		}
+		t.Fatalf("unexpected request reached podman: %s %s", r.Method, r.URL.Path)
+	})
+
+	podmanSock, cleanup1 := mockPodman(t, podman)
+	defer cleanup1()
+
+	proxySock, cleanup2 := startProxy(t, podmanSock, defaultPolicy())
+	defer cleanup2()
+
+	client := unixClient(proxySock)
+
+	// Create a container first.
+	resp, _ := client.Post(
+		"http://localhost/v4.0.0/containers/create",
+		"application/json",
+		strings.NewReader(`{"Image":"alpine"}`),
+	)
+	resp.Body.Close()
+
+	// Exec should be blocked even on owned container.
+	resp, err := client.Post("http://localhost/v4.0.0/containers/"+containerID+"/exec",
+		"application/json",
+		strings.NewReader(`{"Cmd":["sh"]}`))
+	if err != nil {
+		t.Fatalf("exec request: %v", err)
+	}
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusForbidden {
+		t.Fatalf("expected 403 for exec, got %d", resp.StatusCode)
+	}
+
+	// Update should be blocked.
+	resp, err = client.Post("http://localhost/v4.0.0/containers/"+containerID+"/update",
+		"application/json",
+		strings.NewReader(`{"Memory":999999999}`))
+	if err != nil {
+		t.Fatalf("update request: %v", err)
+	}
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusForbidden {
+		t.Fatalf("expected 403 for update, got %d", resp.StatusCode)
+	}
+
+	// Archive should be blocked.
+	resp, err = client.Get("http://localhost/v4.0.0/containers/" + containerID + "/archive?path=/etc")
+	if err != nil {
+		t.Fatalf("archive request: %v", err)
+	}
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusForbidden {
+		t.Fatalf("expected 403 for archive, got %d", resp.StatusCode)
+	}
+}
+
 func TestProxyAllowsPing(t *testing.T) {
 	podman := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusOK)
@@ -430,14 +686,13 @@ func TestProxyAllowsPing(t *testing.T) {
 }
 
 func TestProxyAllowsOwnedContainerOps(t *testing.T) {
-	containerID := "abc123def456789"
+	containerID := "abc123def456789012345678"
 	podman := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if strings.Contains(r.URL.Path, "/containers/create") {
 			w.WriteHeader(http.StatusCreated)
 			json.NewEncoder(w).Encode(map[string]string{"Id": containerID})
 			return
 		}
-		// All other container ops succeed.
 		w.WriteHeader(http.StatusOK)
 		w.Write([]byte("{}"))
 	})
@@ -450,7 +705,6 @@ func TestProxyAllowsOwnedContainerOps(t *testing.T) {
 
 	client := unixClient(proxySock)
 
-	// Create first.
 	resp, _ := client.Post(
 		"http://localhost/v4.0.0/containers/create",
 		"application/json",
@@ -458,7 +712,7 @@ func TestProxyAllowsOwnedContainerOps(t *testing.T) {
 	)
 	resp.Body.Close()
 
-	// Now start it — should be allowed (owned).
+	// Start should be allowed (owned, action in whitelist).
 	resp, err := client.Post("http://localhost/v4.0.0/containers/"+containerID+"/start", "", nil)
 	if err != nil {
 		t.Fatalf("start: %v", err)
@@ -468,14 +722,24 @@ func TestProxyAllowsOwnedContainerOps(t *testing.T) {
 		t.Fatalf("expected 200 for start, got %d", resp.StatusCode)
 	}
 
-	// Short prefix should also work.
-	resp, err = client.Post("http://localhost/v4.0.0/containers/abc123/start", "", nil)
+	// 12-char prefix should also work.
+	resp, err = client.Post("http://localhost/v4.0.0/containers/abc123def456/start", "", nil)
 	if err != nil {
 		t.Fatalf("start with prefix: %v", err)
 	}
 	resp.Body.Close()
 	if resp.StatusCode != http.StatusOK {
 		t.Fatalf("expected 200 for prefix start, got %d", resp.StatusCode)
+	}
+
+	// Short prefix (< 12) should NOT work.
+	resp, err = client.Post("http://localhost/v4.0.0/containers/abc123/start", "", nil)
+	if err != nil {
+		t.Fatalf("start with short prefix: %v", err)
+	}
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusForbidden {
+		t.Fatalf("expected 403 for short prefix, got %d", resp.StatusCode)
 	}
 }
 
@@ -485,7 +749,7 @@ func TestProxyResourceCapping(t *testing.T) {
 		body, _ := io.ReadAll(r.Body)
 		json.Unmarshal(body, &receivedBody)
 		w.WriteHeader(http.StatusCreated)
-		json.NewEncoder(w).Encode(map[string]string{"Id": "test123"})
+		json.NewEncoder(w).Encode(map[string]string{"Id": "test1234567890ab"})
 	})
 
 	podmanSock, cleanup1 := mockPodman(t, podman)
@@ -503,30 +767,45 @@ func TestProxyResourceCapping(t *testing.T) {
 	resp, _ := client.Post(
 		"http://localhost/v4.0.0/containers/create",
 		"application/json",
-		strings.NewReader(`{"Image":"alpine","HostConfig":{"Memory":9999,"NanoCpus":4000000000,"CapAdd":["SYS_ADMIN","NET_BIND_SERVICE"],"Devices":[{"PathOnHost":"/dev/sda"}]}}`),
+		strings.NewReader(`{"Image":"alpine","HostConfig":{"Memory":9999,"NanoCpus":4000000000,"CapAdd":["SYS_ADMIN","NET_BIND_SERVICE"],"Devices":[{"PathOnHost":"/dev/sda"}],"SecurityOpt":["seccomp=unconfined"],"Sysctls":{"net.ipv4.ip_forward":"1"}}}`),
 	)
 	resp.Body.Close()
 
 	// Check what podman received.
-	var hc hostConfig
-	json.Unmarshal(receivedBody["HostConfig"], &hc)
+	var rawHC map[string]json.RawMessage
+	json.Unmarshal(receivedBody["HostConfig"], &rawHC)
 
-	if hc.Memory != 1024 {
-		t.Fatalf("expected memory 1024, got %d", hc.Memory)
+	var mem int64
+	json.Unmarshal(rawHC["Memory"], &mem)
+	if mem != 1024 {
+		t.Fatalf("expected memory 1024, got %d", mem)
 	}
-	if hc.NanoCpus != 1e9 {
-		t.Fatalf("expected NanoCpus 1e9, got %d", hc.NanoCpus)
+
+	var nano int64
+	json.Unmarshal(rawHC["NanoCpus"], &nano)
+	if nano != 1e9 {
+		t.Fatalf("expected NanoCpus 1e9, got %d", nano)
 	}
-	if len(hc.CapAdd) != 1 || hc.CapAdd[0] != "NET_BIND_SERVICE" {
-		t.Fatalf("expected only NET_BIND_SERVICE cap, got %v", hc.CapAdd)
+
+	var caps []string
+	json.Unmarshal(rawHC["CapAdd"], &caps)
+	if len(caps) != 1 || caps[0] != "NET_BIND_SERVICE" {
+		t.Fatalf("expected only NET_BIND_SERVICE cap, got %v", caps)
 	}
-	if len(hc.Devices) != 0 {
-		t.Fatalf("expected devices stripped, got %v", hc.Devices)
+
+	if _, ok := rawHC["Devices"]; ok {
+		t.Fatal("expected Devices to be removed")
+	}
+	if _, ok := rawHC["SecurityOpt"]; ok {
+		t.Fatal("expected SecurityOpt to be removed")
+	}
+	if _, ok := rawHC["Sysctls"]; ok {
+		t.Fatal("expected Sysctls to be removed")
 	}
 }
 
 func TestProxyContainerRemoveUntracks(t *testing.T) {
-	containerID := "abc123def456789"
+	containerID := "abc123def456789012345678"
 	podman := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if strings.Contains(r.URL.Path, "/containers/create") {
 			w.WriteHeader(http.StatusCreated)
@@ -544,7 +823,6 @@ func TestProxyContainerRemoveUntracks(t *testing.T) {
 
 	client := unixClient(proxySock)
 
-	// Create.
 	resp, _ := client.Post(
 		"http://localhost/v4.0.0/containers/create",
 		"application/json",
@@ -574,18 +852,93 @@ func TestProxyContainerRemoveUntracks(t *testing.T) {
 	}
 }
 
-// TestPolicyValidateBindsTraversal tests that ".." traversal is caught.
-func TestPolicyValidateBindsTraversal(t *testing.T) {
-	ws := t.TempDir()
-	p := &Policy{Workspace: ws}
-	body := `{"Image":"alpine","HostConfig":{"Binds":["` + ws + `/../etc/passwd:/mnt"]}}`
-	_, err := p.ValidateAndSanitize([]byte(body))
-	if err == nil {
-		t.Fatal("expected error for path traversal")
+func TestProxyRemoveDoesNotUntrackOnError(t *testing.T) {
+	containerID := "abc123def456789012345678"
+	podman := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if strings.Contains(r.URL.Path, "/containers/create") {
+			w.WriteHeader(http.StatusCreated)
+			json.NewEncoder(w).Encode(map[string]string{"Id": containerID})
+			return
+		}
+		// Simulate a failed delete.
+		if r.Method == http.MethodDelete {
+			w.WriteHeader(http.StatusConflict)
+			w.Write([]byte(`{"message":"container is running"}`))
+			return
+		}
+		w.WriteHeader(http.StatusOK)
+	})
+
+	podmanSock, cleanup1 := mockPodman(t, podman)
+	defer cleanup1()
+
+	proxySock, cleanup2 := startProxy(t, podmanSock, defaultPolicy())
+	defer cleanup2()
+
+	client := unixClient(proxySock)
+
+	resp, _ := client.Post(
+		"http://localhost/v4.0.0/containers/create",
+		"application/json",
+		strings.NewReader(`{"Image":"alpine"}`),
+	)
+	resp.Body.Close()
+
+	// Failed delete (409 Conflict).
+	req, _ := http.NewRequest(http.MethodDelete, "http://localhost/v4.0.0/containers/"+containerID, nil)
+	resp, _ = client.Do(req)
+	resp.Body.Close()
+
+	// Container should still be owned (not untracked because delete failed).
+	resp, err := client.Post("http://localhost/v4.0.0/containers/"+containerID+"/start", "", nil)
+	if err != nil {
+		t.Fatalf("start after failed delete: %v", err)
+	}
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("expected 200 (still owned), got %d", resp.StatusCode)
+	}
+}
+
+func TestProxyTracksContainerName(t *testing.T) {
+	containerID := "abc123def456789012345678"
+	podman := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if strings.Contains(r.URL.Path, "/containers/create") {
+			w.WriteHeader(http.StatusCreated)
+			json.NewEncoder(w).Encode(map[string]string{"Id": containerID})
+			return
+		}
+		w.WriteHeader(http.StatusOK)
+		w.Write([]byte("{}"))
+	})
+
+	podmanSock, cleanup1 := mockPodman(t, podman)
+	defer cleanup1()
+
+	proxySock, cleanup2 := startProxy(t, podmanSock, defaultPolicy())
+	defer cleanup2()
+
+	client := unixClient(proxySock)
+
+	// Create with ?name=my-worker
+	resp, _ := client.Post(
+		"http://localhost/v4.0.0/containers/create?name=my-worker",
+		"application/json",
+		strings.NewReader(`{"Image":"alpine"}`),
+	)
+	resp.Body.Close()
+
+	// Access by name should work.
+	resp, err := client.Post("http://localhost/v4.0.0/containers/my-worker/start", "", nil)
+	if err != nil {
+		t.Fatalf("start by name: %v", err)
+	}
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("expected 200 for name-based access, got %d", resp.StatusCode)
 	}
 }
 
 func init() {
-	// Suppress log output during tests.
 	_ = os.Stderr
 }

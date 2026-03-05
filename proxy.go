@@ -9,23 +9,45 @@ import (
 	"log"
 	"net"
 	"net/http"
+	"net/url"
 	"regexp"
-	"strings"
+	"time"
 )
 
-// route patterns for container operations
-var (
-	// POST /v{version}/containers/create or /containers/create
-	containerCreateRe = regexp.MustCompile(`^(/v[\d.]+)?/containers/create$`)
-	// GET /v{version}/containers/json or /containers/json
-	containerListRe = regexp.MustCompile(`^(/v[\d.]+)?/containers/json$`)
-	// Operations on a specific container: /v{version}/containers/{id}/{action}
-	containerOpRe = regexp.MustCompile(`^(/v[\d.]+)?/containers/([^/]+)(/(.+))?$`)
-	// Version ping
-	pingRe = regexp.MustCompile(`^(/v[\d.]+)?/_ping$`)
-	// Version endpoint
-	versionRe = regexp.MustCompile(`^(/v[\d.]+)?/version$`)
+const (
+	maxRequestBody  = 10 * 1024 * 1024  // 10 MB
+	maxResponseBody = 128 * 1024 * 1024 // 128 MB
+	clientTimeout   = 60 * time.Second
+	dialTimeout     = 5 * time.Second
 )
+
+// Route patterns for container operations.
+var (
+	containerCreateRe = regexp.MustCompile(`^(/v[\d.]+)?/containers/create$`)
+	containerListRe   = regexp.MustCompile(`^(/v[\d.]+)?/containers/json$`)
+	containerOpRe     = regexp.MustCompile(`^(/v[\d.]+)?/containers/([^/]+)(/([^/]+))?$`)
+	pingRe            = regexp.MustCompile(`^(/v[\d.]+)?/_ping$`)
+	versionRe         = regexp.MustCompile(`^(/v[\d.]+)?/version$`)
+)
+
+// allowedContainerActions is the whitelist of per-container sub-operations.
+// Everything not in this set is blocked (exec, update, archive, copy, export, etc.).
+var allowedContainerActions = map[string]bool{
+	"":        true, // inspect (GET) or delete (DELETE) with no action
+	"start":   true,
+	"stop":    true,
+	"kill":    true,
+	"wait":    true,
+	"logs":    true,
+	"json":    true, // inspect
+	"top":     true,
+	"stats":   true,
+	"rename":  true,
+	"resize":  true,
+	"pause":   true,
+	"unpause": true,
+	"remove":  true,
+}
 
 // Proxy is the HTTP handler that enforces policy and forwards to podman.
 type Proxy struct {
@@ -38,7 +60,7 @@ type Proxy struct {
 func (p *Proxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	path := r.URL.Path
 
-	// Always allow ping and version — they're harmless info endpoints.
+	// Always allow ping and version — harmless info endpoints.
 	if pingRe.MatchString(path) || versionRe.MatchString(path) {
 		p.forward(w, r, nil)
 		return
@@ -59,13 +81,15 @@ func (p *Proxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	// Per-container operations.
 	if m := containerOpRe.FindStringSubmatch(path); m != nil {
 		containerRef := m[2]
-		// "json" on its own would be caught by the list regex above, so if we get
-		// here it's a specific container reference. But guard against "create".
+		action := m[4] // empty string if no sub-action
+
+		// Guard: "create" and "json" as container refs are routing artifacts.
 		if containerRef == "create" || containerRef == "json" {
 			http.Error(w, "forbidden", http.StatusForbidden)
 			return
 		}
-		p.handleContainerOp(w, r, containerRef)
+
+		p.handleContainerOp(w, r, containerRef, action)
 		return
 	}
 
@@ -75,6 +99,7 @@ func (p *Proxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 }
 
 func (p *Proxy) handleCreate(w http.ResponseWriter, r *http.Request) {
+	r.Body = http.MaxBytesReader(w, r.Body, maxRequestBody)
 	body, err := io.ReadAll(r.Body)
 	r.Body.Close()
 	if err != nil {
@@ -96,13 +121,17 @@ func (p *Proxy) handleCreate(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// If podman created it successfully, track the container ID.
-	if resp.StatusCode == http.StatusCreated || resp.StatusCode == http.StatusOK {
+	// Track the container on any 2xx response.
+	if resp.StatusCode >= 200 && resp.StatusCode < 300 {
 		var createResp struct {
 			Id string `json:"Id"`
 		}
 		if json.Unmarshal(respBody, &createResp) == nil && createResp.Id != "" {
 			p.Ownership.Add(createResp.Id)
+			// Track name if provided in query parameter.
+			if name := r.URL.Query().Get("name"); name != "" {
+				p.Ownership.SetName(createResp.Id, name)
+			}
 			short := createResp.Id
 			if len(short) > 12 {
 				short = short[:12]
@@ -126,10 +155,10 @@ func (p *Proxy) handleList(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Filter to only owned containers.
+	// Filter to only owned containers — by ID only, not by name.
+	// Name-based matching could leak cross-tenant containers via prefix confusion.
 	var containers []json.RawMessage
 	if err := json.Unmarshal(respBody, &containers); err != nil {
-		// If we can't parse, return empty list rather than leaking.
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(http.StatusOK)
 		w.Write([]byte("[]"))
@@ -139,24 +168,13 @@ func (p *Proxy) handleList(w http.ResponseWriter, r *http.Request) {
 	filtered := make([]json.RawMessage, 0, len(containers))
 	for _, c := range containers {
 		var info struct {
-			Id    string   `json:"Id"`
-			Names []string `json:"Names"`
+			Id string `json:"Id"`
 		}
 		if json.Unmarshal(c, &info) != nil {
 			continue
 		}
 		if p.Ownership.Owns(info.Id) {
 			filtered = append(filtered, c)
-			continue
-		}
-		// Also check by name.
-		for _, name := range info.Names {
-			// Names may have leading "/".
-			clean := strings.TrimPrefix(name, "/")
-			if p.Ownership.Owns(clean) {
-				filtered = append(filtered, c)
-				break
-			}
 		}
 	}
 
@@ -172,28 +190,44 @@ func (p *Proxy) handleList(w http.ResponseWriter, r *http.Request) {
 	w.Write(result)
 }
 
-func (p *Proxy) handleContainerOp(w http.ResponseWriter, r *http.Request, containerRef string) {
+func (p *Proxy) handleContainerOp(w http.ResponseWriter, r *http.Request, containerRef, action string) {
+	// Check action is in the whitelist.
+	if !allowedContainerActions[action] {
+		log.Printf("[%s] BLOCKED action %q on container %s", p.AgentID, action, containerRef)
+		http.Error(w, fmt.Sprintf("forbidden: action %q not allowed", action), http.StatusForbidden)
+		return
+	}
+
+	// Check ownership.
 	if !p.Ownership.Owns(containerRef) {
 		log.Printf("[%s] BLOCKED access to unowned container %s", p.AgentID, containerRef)
 		http.Error(w, "forbidden: container not owned by this agent", http.StatusForbidden)
 		return
 	}
 
-	// For delete/remove, also untrack.
-	path := r.URL.Path
+	// Determine if this is a remove operation.
 	isRemove := r.Method == http.MethodDelete ||
-		(r.Method == http.MethodPost && strings.HasSuffix(path, "/remove"))
+		(r.Method == http.MethodPost && action == "remove")
 
-	p.forward(w, r, nil)
+	// Forward and capture response to check status before untracking.
+	resp, respBody, err := p.doForward(r, nil)
+	if err != nil {
+		http.Error(w, fmt.Sprintf("upstream error: %v", err), http.StatusBadGateway)
+		return
+	}
 
-	if isRemove {
-		// Find and remove the full ID that matched this ref.
-		for _, id := range p.Ownership.IDs() {
-			if id == containerRef || strings.HasPrefix(id, containerRef) {
-				p.Ownership.Remove(id)
-				log.Printf("[%s] REMOVED container %s", p.AgentID, id[:min(12, len(id))])
-				break
+	writeResponse(w, resp, respBody)
+
+	// Only untrack on successful remove (2xx).
+	if isRemove && resp.StatusCode >= 200 && resp.StatusCode < 300 {
+		fullID := p.Ownership.FullID(containerRef)
+		if fullID != "" {
+			p.Ownership.Remove(fullID)
+			short := fullID
+			if len(short) > 12 {
+				short = short[:12]
 			}
+			log.Printf("[%s] REMOVED container %s", p.AgentID, short)
 		}
 	}
 }
@@ -211,9 +245,11 @@ func (p *Proxy) forward(w http.ResponseWriter, r *http.Request, body []byte) {
 // doForward performs the actual HTTP request to the podman socket.
 func (p *Proxy) doForward(r *http.Request, overrideBody []byte) (*http.Response, []byte, error) {
 	client := &http.Client{
+		Timeout: clientTimeout,
 		Transport: &http.Transport{
-			DialContext: func(_ context.Context, _, _ string) (net.Conn, error) {
-				return net.Dial("unix", p.PodmanSocket)
+			DialContext: func(ctx context.Context, _, _ string) (net.Conn, error) {
+				d := net.Dialer{Timeout: dialTimeout}
+				return d.DialContext(ctx, "unix", p.PodmanSocket)
 			},
 		},
 	}
@@ -222,7 +258,7 @@ func (p *Proxy) doForward(r *http.Request, overrideBody []byte) (*http.Response,
 	if overrideBody != nil {
 		bodyReader = bytes.NewReader(overrideBody)
 	} else if r.Body != nil {
-		bodyData, err := io.ReadAll(r.Body)
+		bodyData, err := io.ReadAll(io.LimitReader(r.Body, maxRequestBody))
 		r.Body.Close()
 		if err != nil {
 			return nil, nil, fmt.Errorf("reading request body: %w", err)
@@ -230,14 +266,12 @@ func (p *Proxy) doForward(r *http.Request, overrideBody []byte) (*http.Response,
 		bodyReader = bytes.NewReader(bodyData)
 	}
 
-	// Build the forwarded request — target is http://podman/<path>.
-	url := "http://podman" + r.URL.RequestURI()
-	req, err := http.NewRequestWithContext(r.Context(), r.Method, url, bodyReader)
+	reqURL := "http://podman" + r.URL.RequestURI()
+	req, err := http.NewRequestWithContext(r.Context(), r.Method, reqURL, bodyReader)
 	if err != nil {
 		return nil, nil, fmt.Errorf("creating forward request: %w", err)
 	}
 
-	// Copy relevant headers.
 	for _, h := range []string{"Content-Type", "Accept", "X-Registry-Auth"} {
 		if v := r.Header.Get(h); v != "" {
 			req.Header.Set(h, v)
@@ -253,7 +287,7 @@ func (p *Proxy) doForward(r *http.Request, overrideBody []byte) (*http.Response,
 	}
 	defer resp.Body.Close()
 
-	respBody, err := io.ReadAll(resp.Body)
+	respBody, err := io.ReadAll(io.LimitReader(resp.Body, maxResponseBody))
 	if err != nil {
 		return nil, nil, fmt.Errorf("reading podman response: %w", err)
 	}
@@ -282,25 +316,31 @@ func (p *Proxy) CleanupContainers() {
 	log.Printf("[%s] Cleaning up %d owned containers...", p.AgentID, len(ids))
 
 	client := &http.Client{
+		Timeout: 30 * time.Second,
 		Transport: &http.Transport{
-			DialContext: func(_ context.Context, _, _ string) (net.Conn, error) {
-				return net.Dial("unix", p.PodmanSocket)
+			DialContext: func(ctx context.Context, _, _ string) (net.Conn, error) {
+				d := net.Dialer{Timeout: dialTimeout}
+				return d.DialContext(ctx, "unix", p.PodmanSocket)
 			},
 		},
 	}
 
 	for _, id := range ids {
-		short := id[:min(12, len(id))]
+		short := id
+		if len(short) > 12 {
+			short = short[:12]
+		}
+		escaped := url.PathEscape(id)
 
 		// Stop (ignore errors — container may already be stopped).
-		stopURL := fmt.Sprintf("http://podman/v4.0.0/containers/%s/stop?t=5", id)
+		stopURL := fmt.Sprintf("http://podman/v4.0.0/containers/%s/stop?t=5", escaped)
 		req, _ := http.NewRequest(http.MethodPost, stopURL, nil)
 		if resp, err := client.Do(req); err == nil {
 			resp.Body.Close()
 		}
 
 		// Remove with force and volumes.
-		rmURL := fmt.Sprintf("http://podman/v4.0.0/containers/%s?force=true&v=true", id)
+		rmURL := fmt.Sprintf("http://podman/v4.0.0/containers/%s?force=true&v=true", escaped)
 		req, _ = http.NewRequest(http.MethodDelete, rmURL, nil)
 		if resp, err := client.Do(req); err == nil {
 			resp.Body.Close()
@@ -312,4 +352,3 @@ func (p *Proxy) CleanupContainers() {
 		p.Ownership.Remove(id)
 	}
 }
-

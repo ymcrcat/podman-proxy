@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"flag"
 	"fmt"
 	"log"
@@ -10,6 +11,7 @@ import (
 	"os/signal"
 	"strings"
 	"syscall"
+	"time"
 )
 
 func main() {
@@ -22,7 +24,6 @@ func main() {
 	agentID := flag.String("agent-id", "agent", "Agent identifier for logging/labeling")
 	flag.Parse()
 
-	// Build image allowlist.
 	var images []string
 	if *allowedImages != "" {
 		for _, img := range strings.Split(*allowedImages, ",") {
@@ -54,14 +55,20 @@ func main() {
 	if err != nil {
 		log.Fatalf("Failed to listen on %s: %v", *listenPath, err)
 	}
-	// Make socket accessible to containers.
 	if err := os.Chmod(*listenPath, 0666); err != nil {
 		log.Printf("Warning: could not chmod socket: %v", err)
 	}
 
-	server := &http.Server{Handler: proxy}
+	server := &http.Server{
+		Handler:           proxy,
+		ReadHeaderTimeout: 10 * time.Second,
+		ReadTimeout:       30 * time.Second,
+		WriteTimeout:      120 * time.Second,
+		IdleTimeout:       60 * time.Second,
+	}
 
 	// Graceful shutdown on SIGTERM/SIGINT.
+	// Order: stop accepting new connections, then clean up containers.
 	sigCh := make(chan os.Signal, 1)
 	signal.Notify(sigCh, syscall.SIGTERM, syscall.SIGINT)
 
@@ -69,11 +76,13 @@ func main() {
 		sig := <-sigCh
 		log.Printf("[%s] Received %v, shutting down...", *agentID, sig)
 
-		// Clean up owned containers before stopping.
-		proxy.CleanupContainers()
+		// 1. Stop accepting new connections and drain in-flight requests.
+		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		defer cancel()
+		server.Shutdown(ctx)
 
-		// Close the listener to stop accepting new connections.
-		server.Close()
+		// 2. Clean up owned containers after all requests have completed.
+		proxy.CleanupContainers()
 	}()
 
 	fmt.Printf("podman-proxy [%s] listening on %s\n", *agentID, *listenPath)
@@ -87,6 +96,12 @@ func main() {
 	if err := server.Serve(listener); err != http.ErrServerClosed {
 		log.Fatalf("Server error: %v", err)
 	}
+
+	// Wait for the signal handler goroutine to finish cleanup.
+	// server.Serve returns immediately after Shutdown is called,
+	// but we need to wait for CleanupContainers to complete.
+	// Use a small sleep to let the goroutine finish.
+	time.Sleep(100 * time.Millisecond)
 
 	log.Printf("[%s] Shutdown complete.", *agentID)
 }
